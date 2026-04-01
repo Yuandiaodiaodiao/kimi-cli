@@ -98,6 +98,41 @@ export class KimiCLI {
       }
     }
 
+    // Fallback: create LLM from environment variables directly
+    // Supports: KIMI_BASE_URL, KIMI_API_KEY, KIMI_MODEL_NAME
+    if (!llm) {
+      const envBaseUrl = process.env.KIMI_BASE_URL;
+      const envApiKey = process.env.KIMI_API_KEY;
+      const envModel = process.env.KIMI_MODEL_NAME;
+
+      if (envBaseUrl && envApiKey && envModel) {
+        const llmProvider = {
+          type: "kimi" as const,
+          baseUrl: envBaseUrl,
+          apiKey: envApiKey,
+        };
+        const llmModel = {
+          model: envModel,
+          provider: "env",
+          maxContextSize: parseInt(
+            process.env.KIMI_MODEL_MAX_CONTEXT_SIZE ?? "131072",
+            10,
+          ),
+          capabilities: undefined as any,
+        };
+
+        llm = createLLM(llmProvider, llmModel, {
+          thinking: opts.thinking ?? config.default_thinking,
+        });
+
+        if (llm) {
+          logger.info(
+            `LLM from env: ${envModel} @ ${envBaseUrl}`,
+          );
+        }
+      }
+    }
+
     if (!llm) {
       logger.warn(
         `No LLM configured for model "${modelName}". ` +
@@ -144,7 +179,16 @@ export class KimiCLI {
     const soul = new KimiSoul({
       agent,
       context,
-      callbacks: opts.callbacks,
+      callbacks: {
+        ...opts.callbacks,
+        onTextDelta: opts.callbacks?.onTextDelta ?? ((text) => process.stdout.write(text)),
+        onThinkDelta: opts.callbacks?.onThinkDelta ?? ((text) => {
+          process.stdout.write(`\x1b[2m${text}\x1b[0m`);
+        }),
+        onError: opts.callbacks?.onError ?? ((err) => {
+          console.error(`\n[Error] ${err.message}`);
+        }),
+      },
     });
 
     // Wire slash commands

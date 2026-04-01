@@ -297,8 +297,6 @@ export function estimateMessagesTokenCount(messages: Message[]): number {
 
 /**
  * Create an LLM instance from provider and model config.
- * Currently creates a stub provider — real provider implementations
- * will be added when the HTTP client layer is ready.
  */
 export function createLLM(
   provider: LLMProviderConfig,
@@ -329,22 +327,360 @@ export function createLLM(
     thinkingMode = "off";
   }
 
-  // Create a stub provider — real implementations will be plugged in
-  const stubProvider: LLMProvider = {
-    modelName: model.model,
-    async *chat(messages: Message[], chatOpts?: ChatOptions) {
-      throw new Error(
-        `LLM provider "${provider.type}" is not yet implemented in TypeScript. ` +
-          `Model: ${model.model}`
-      );
-    },
-  };
+  // Create real provider based on type
+  let llmProvider: LLMProvider;
+
+  switch (provider.type) {
+    case "kimi":
+    case "openai_legacy":
+    case "openai_responses":
+      llmProvider = new OpenAICompatibleProvider({
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        modelName: model.model,
+        customHeaders: provider.customHeaders,
+        thinkingMode,
+      });
+      break;
+
+    case "_echo":
+      llmProvider = {
+        modelName: model.model,
+        async *chat(messages: Message[]) {
+          const lastMsg = messages[messages.length - 1];
+          const text = lastMsg
+            ? typeof lastMsg.content === "string"
+              ? lastMsg.content
+              : "[echo]"
+            : "[empty]";
+          yield { type: "text" as const, text };
+          yield {
+            type: "usage" as const,
+            usage: { inputTokens: 10, outputTokens: text.length },
+          };
+          yield { type: "done" as const };
+        },
+      };
+      break;
+
+    default:
+      llmProvider = {
+        modelName: model.model,
+        async *chat() {
+          throw new Error(
+            `LLM provider "${provider.type}" is not yet implemented. Model: ${model.model}`
+          );
+        },
+      };
+      break;
+  }
 
   return new LLM({
-    provider: stubProvider,
+    provider: llmProvider,
     maxContextSize: model.maxContextSize,
     capabilities,
     modelConfig: model,
     providerConfig: provider,
   });
+}
+
+// ── OpenAI-Compatible Provider ──────────────────────────────
+// Works with Kimi API, OpenAI API, and any OpenAI-compatible endpoint.
+
+interface OpenAICompatibleProviderConfig {
+  baseUrl: string;
+  apiKey: string;
+  modelName: string;
+  customHeaders?: Record<string, string>;
+  thinkingMode?: "high" | "low" | "off";
+}
+
+interface OpenAIMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content?: string | OpenAIContentPart[] | null;
+  tool_calls?: OpenAIToolCall[];
+  tool_call_id?: string;
+}
+
+interface OpenAIContentPart {
+  type: string;
+  text?: string;
+  image_url?: { url: string };
+}
+
+interface OpenAIToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+interface OpenAITool {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+class OpenAICompatibleProvider implements LLMProvider {
+  readonly modelName: string;
+  private baseUrl: string;
+  private apiKey: string;
+  private customHeaders: Record<string, string>;
+  private thinkingMode?: "high" | "low" | "off";
+
+  constructor(config: OpenAICompatibleProviderConfig) {
+    this.modelName = config.modelName;
+    this.baseUrl = config.baseUrl.replace(/\/+$/, "");
+    this.apiKey = config.apiKey;
+    this.customHeaders = config.customHeaders ?? {};
+    this.thinkingMode = config.thinkingMode;
+  }
+
+  async *chat(
+    messages: Message[],
+    options?: ChatOptions,
+  ): AsyncIterable<StreamChunk> {
+    // Convert messages to OpenAI format
+    const openaiMessages = this.convertMessages(messages, options?.system);
+
+    // Build request body
+    const body: Record<string, unknown> = {
+      model: this.modelName,
+      messages: openaiMessages,
+      stream: true,
+    };
+
+    if (options?.maxTokens) body.max_tokens = options.maxTokens;
+    if (options?.temperature != null) body.temperature = options.temperature;
+    if (options?.topP != null) body.top_p = options.topP;
+
+    // Tools
+    if (options?.tools && options.tools.length > 0) {
+      body.tools = options.tools.map(
+        (t): OpenAITool => ({
+          type: "function",
+          function: {
+            name: t.name,
+            description: t.description,
+            parameters: t.parameters,
+          },
+        }),
+      );
+    }
+
+    // Fetch streaming response
+    const url = `${this.baseUrl}/chat/completions`;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.apiKey}`,
+      ...this.customHeaders,
+    };
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: options?.signal,
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(
+        `LLM API error ${response.status}: ${text.slice(0, 500)}`,
+      );
+    }
+
+    if (!response.body) {
+      throw new Error("LLM API returned no body");
+    }
+
+    // Parse SSE stream
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    const pendingToolCalls = new Map<
+      number,
+      { id: string; name: string; arguments: string }
+    >();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === "data: [DONE]") continue;
+          if (!trimmed.startsWith("data: ")) continue;
+
+          const jsonStr = trimmed.slice(6);
+          let data: any;
+          try {
+            data = JSON.parse(jsonStr);
+          } catch {
+            continue;
+          }
+
+          // Extract usage if present
+          if (data.usage) {
+            totalInputTokens =
+              data.usage.prompt_tokens ?? data.usage.input_tokens ?? 0;
+            totalOutputTokens =
+              data.usage.completion_tokens ?? data.usage.output_tokens ?? 0;
+          }
+
+          const choices = data.choices;
+          if (!choices || choices.length === 0) continue;
+
+          const delta = choices[0].delta;
+          if (!delta) continue;
+
+          // Text content
+          if (delta.content) {
+            yield { type: "text", text: delta.content };
+          }
+
+          // Reasoning/thinking content (Kimi k2.5 specific)
+          if (delta.reasoning_content) {
+            yield { type: "think", text: delta.reasoning_content };
+          }
+
+          // Tool calls
+          if (delta.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index ?? 0;
+              if (tc.id) {
+                // New tool call
+                pendingToolCalls.set(idx, {
+                  id: tc.id,
+                  name: tc.function?.name ?? "",
+                  arguments: tc.function?.arguments ?? "",
+                });
+              } else if (pendingToolCalls.has(idx)) {
+                // Append to existing
+                const existing = pendingToolCalls.get(idx)!;
+                if (tc.function?.name) existing.name += tc.function.name;
+                if (tc.function?.arguments)
+                  existing.arguments += tc.function.arguments;
+              }
+            }
+          }
+
+          // Check for finish reason
+          if (choices[0].finish_reason) {
+            // Emit any pending tool calls
+            for (const [, tc] of pendingToolCalls) {
+              yield {
+                type: "tool_call",
+                id: tc.id,
+                name: tc.name,
+                arguments: tc.arguments,
+              };
+            }
+            pendingToolCalls.clear();
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    // Emit usage
+    if (totalInputTokens > 0 || totalOutputTokens > 0) {
+      yield {
+        type: "usage",
+        usage: {
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+        },
+      };
+    }
+
+    yield { type: "done" };
+  }
+
+  private convertMessages(
+    messages: Message[],
+    system?: string,
+  ): OpenAIMessage[] {
+    const result: OpenAIMessage[] = [];
+
+    // System prompt
+    if (system) {
+      result.push({ role: "system", content: system });
+    }
+
+    for (const msg of messages) {
+      if (typeof msg.content === "string") {
+        result.push({
+          role: msg.role as "user" | "assistant" | "system",
+          content: msg.content,
+        });
+      } else {
+        // Complex content with parts
+        const textParts: string[] = [];
+        const toolUseParts: OpenAIToolCall[] = [];
+        const toolResultParts: { toolCallId: string; content: string }[] = [];
+
+        for (const part of msg.content) {
+          switch (part.type) {
+            case "text":
+              textParts.push(part.text);
+              break;
+            case "tool_use":
+              toolUseParts.push({
+                id: part.id,
+                type: "function",
+                function: {
+                  name: part.name,
+                  arguments: JSON.stringify(part.input),
+                },
+              });
+              break;
+            case "tool_result":
+              toolResultParts.push({
+                toolCallId: part.toolUseId,
+                content: part.content,
+              });
+              break;
+            case "image":
+              // Skip images for now
+              break;
+          }
+        }
+
+        if (msg.role === "assistant" && toolUseParts.length > 0) {
+          result.push({
+            role: "assistant",
+            content: textParts.join("\n") || null,
+            tool_calls: toolUseParts,
+          });
+        } else if (toolResultParts.length > 0) {
+          // Tool results become individual tool messages
+          for (const tr of toolResultParts) {
+            result.push({
+              role: "tool",
+              tool_call_id: tr.toolCallId,
+              content: tr.content,
+            });
+          }
+        } else {
+          result.push({
+            role: msg.role as "user" | "assistant" | "system",
+            content: textParts.join("\n"),
+          });
+        }
+      }
+    }
+
+    return result;
+  }
 }
