@@ -159,23 +159,25 @@ export function Shell({
         tip="Spot a bug or have feedback? Type /feedback right in this session — every report makes Kimi better."
       />
 
-      {/* Middle: Chat area (flex-grow) */}
+      {/*
+       * Middle: unified content flow (flex-grow).
+       * Messages + input in one stream, content starts from top,
+       * empty space below naturally fills remaining height.
+       */}
       <Box flexDirection="column" flexGrow={1} overflow="hidden">
-        {/* Chat history */}
-        <Box flexDirection="column" flexGrow={1} overflow="hidden">
-          <MessageList
-            messages={wire.messages}
-            isStreaming={wire.isStreaming}
-          />
+        {/* Messages */}
+        <MessageList
+          messages={wire.messages}
+          isStreaming={wire.isStreaming}
+        />
 
-          {/* Streaming indicator */}
-          {wire.isStreaming && !wire.isCompacting && (
-            <StreamingSpinner stepCount={wire.stepCount} />
-          )}
+        {/* Streaming indicator */}
+        {wire.isStreaming && !wire.isCompacting && (
+          <StreamingSpinner stepCount={wire.stepCount} />
+        )}
 
-          {/* Compaction indicator */}
-          <CompactionSpinner active={wire.isCompacting} />
-        </Box>
+        {/* Compaction indicator */}
+        <CompactionSpinner active={wire.isCompacting} />
 
         {/* Approval prompt (modal) */}
         {wire.pendingApproval && (
@@ -185,7 +187,7 @@ export function Shell({
           />
         )}
 
-        {/* Input prompt ✨ — with slash menu rendered above it */}
+        {/* Input prompt ✨ — in the same flow as messages */}
         <Prompt
           onSubmit={handleSubmit}
           disabled={wire.isStreaming || !!wire.pendingApproval}

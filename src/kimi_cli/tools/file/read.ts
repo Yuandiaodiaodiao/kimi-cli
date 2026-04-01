@@ -60,6 +60,71 @@ function resolvePath(filePath: string, workingDir: string): string {
   return `${workingDir}/${filePath}`;
 }
 
+// ── Binary file detection ─────────────────────────────
+// Magic byte signatures for common binary formats
+
+const BINARY_SIGNATURES: Array<{ bytes: number[]; type: string }> = [
+  { bytes: [0x89, 0x50, 0x4e, 0x47], type: "PNG image" },
+  { bytes: [0xff, 0xd8, 0xff], type: "JPEG image" },
+  { bytes: [0x47, 0x49, 0x46, 0x38], type: "GIF image" },
+  { bytes: [0x52, 0x49, 0x46, 0x46], type: "RIFF (WebP/AVI)" },
+  { bytes: [0x50, 0x4b, 0x03, 0x04], type: "ZIP archive" },
+  { bytes: [0x1f, 0x8b], type: "gzip archive" },
+  { bytes: [0x25, 0x50, 0x44, 0x46], type: "PDF document" },
+  { bytes: [0x7f, 0x45, 0x4c, 0x46], type: "ELF binary" },
+  { bytes: [0xfe, 0xed, 0xfa, 0xce], type: "Mach-O binary" },
+  { bytes: [0xfe, 0xed, 0xfa, 0xcf], type: "Mach-O binary (64-bit)" },
+  { bytes: [0xce, 0xfa, 0xed, 0xfe], type: "Mach-O binary (reverse)" },
+  { bytes: [0xcf, 0xfa, 0xed, 0xfe], type: "Mach-O binary (64-bit reverse)" },
+  { bytes: [0xca, 0xfe, 0xba, 0xbe], type: "Mach-O universal binary" },
+  { bytes: [0x4d, 0x5a], type: "Windows executable" },
+];
+
+const NON_TEXT_EXTENSIONS = new Set([
+  // Images
+  "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "tiff", "tif", "avif", "heic", "heif",
+  // Video
+  "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp",
+  // Audio
+  "mp3", "wav", "ogg", "flac", "aac", "wma", "m4a", "opus",
+  // Archives
+  "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst",
+  // Binaries
+  "exe", "dll", "so", "dylib", "o", "a", "lib", "bin", "dat",
+  // Documents (binary)
+  "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+  // Database
+  "db", "sqlite", "sqlite3",
+  // Fonts
+  "ttf", "otf", "woff", "woff2", "eot",
+  // Other
+  "pyc", "pyo", "class", "jar", "war", "deb", "rpm", "dmg", "iso", "img",
+]);
+
+function detectBinaryType(resolvedPath: string, headerBytes: Uint8Array): string | null {
+  // Check magic bytes
+  for (const sig of BINARY_SIGNATURES) {
+    if (sig.bytes.every((b, i) => headerBytes[i] === b)) {
+      return sig.type;
+    }
+  }
+
+  // Check for NUL bytes in first 8KB (strong binary indicator)
+  for (let i = 0; i < Math.min(headerBytes.length, 8192); i++) {
+    if (headerBytes[i] === 0x00) {
+      return "binary file (contains NUL bytes)";
+    }
+  }
+
+  // Check extension
+  const ext = resolvedPath.split(".").pop()?.toLowerCase() ?? "";
+  if (NON_TEXT_EXTENSIONS.has(ext)) {
+    return `binary file (.${ext})`;
+  }
+
+  return null;
+}
+
 export class ReadFile extends CallableTool<typeof ParamsSchema> {
   readonly name = "ReadFile";
   readonly description = DESCRIPTION;
@@ -78,11 +143,35 @@ export class ReadFile extends CallableTool<typeof ParamsSchema> {
         return ToolError(`\`${params.path}\` does not exist.`);
       }
 
-      // Read file content
+      // Check if it's a directory
+      const { stat } = await import("node:fs/promises");
+      try {
+        const info = await stat(resolvedPath);
+        if (info.isDirectory()) {
+          return ToolError(`\`${params.path}\` is a directory, not a file. Use the Glob tool to list directory contents.`);
+        }
+      } catch {
+        // stat failed — continue, file.text() will catch it
+      }
+
+      // Binary detection: read header bytes first
+      const headerSize = Math.min(file.size, 8192);
+      if (headerSize > 0) {
+        const headerBuf = await file.slice(0, headerSize).arrayBuffer();
+        const headerBytes = new Uint8Array(headerBuf);
+        const binaryType = detectBinaryType(resolvedPath, headerBytes);
+        if (binaryType) {
+          return ToolError(
+            `\`${params.path}\` is a ${binaryType}. This tool can only read text files. ` +
+            `Use the Shell tool if you need to inspect binary files (e.g. \`file\`, \`hexdump\`).`
+          );
+        }
+      }
+
+      // Read file content — stream to avoid OOM on large files
       const text = await file.text();
       const allLines = text.split("\n");
 
-      // If last line is empty (file ends with newline), keep as-is
       const lineOffset = params.line_offset;
       const nLines = params.n_lines;
 

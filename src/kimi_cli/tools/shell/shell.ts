@@ -64,6 +64,48 @@ const ParamsSchema = z
 
 type Params = z.infer<typeof ParamsSchema>;
 
+/** Build a non-interactive environment to prevent prompts from hanging. */
+function getNoninteractiveEnv(): Record<string, string> {
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    TERM: "dumb",
+    // Prevent SSH from trying to open a tty for passphrase/password
+    SSH_ASKPASS: "",
+    SSH_ASKPASS_REQUIRE: "never",
+    // Prevent GPG pinentry
+    GPG_TTY: "",
+    // Disable pager for git, man, etc.
+    GIT_PAGER: "cat",
+    PAGER: "cat",
+    // Disable color in common tools (helps with output parsing)
+    NO_COLOR: "1",
+  };
+}
+
+/** Read a stream and write chunks to builder, interleaving stdout and stderr. */
+async function readStreamToBuilder(
+  stream: ReadableStream<Uint8Array> | null,
+  builder: ToolResultBuilder,
+): Promise<string> {
+  if (!stream) return "";
+  const reader = stream.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  const chunks: string[] = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value, { stream: true });
+      chunks.push(text);
+      builder.write(text);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return chunks.join("");
+}
+
 export class Shell extends CallableTool<typeof ParamsSchema> {
   readonly name = "Shell";
   readonly description = DESCRIPTION;
@@ -98,27 +140,29 @@ export class Shell extends CallableTool<typeof ParamsSchema> {
     try {
       const shellPath = process.env.SHELL || "/bin/bash";
 
-      const proc = Bun.spawn([shellPath, "-c", params.command], {
+      // Redirect stderr to stdout so they're interleaved in order
+      // Use shell syntax: command 2>&1
+      const wrappedCommand = `${params.command} 2>&1`;
+
+      const proc = Bun.spawn([shellPath, "-c", wrappedCommand], {
         stdout: "pipe",
-        stderr: "pipe",
+        stderr: "pipe", // stderr still piped for safety (but most goes to stdout via 2>&1)
+        stdin: "pipe",
         cwd: ctx.workingDir,
-        env: {
-          ...process.env,
-          // Disable interactive features
-          GIT_TERMINAL_PROMPT: "0",
-          TERM: "dumb",
-        },
+        env: getNoninteractiveEnv(),
       });
 
-      // Close stdin so interactive prompts get EOF
-      if (proc.stdin && typeof (proc.stdin as any).end === "function") {
-        (proc.stdin as any).end();
+      // Close stdin immediately so interactive prompts get EOF
+      try {
+        proc.stdin.end();
+      } catch {
+        // Bun may not support .end() on all platforms
       }
 
       let timedOut = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
       try {
-        let timeoutId: ReturnType<typeof setTimeout> | null = null;
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutId = setTimeout(
             () => reject(new Error("timeout")),
@@ -126,28 +170,21 @@ export class Shell extends CallableTool<typeof ParamsSchema> {
           );
         });
 
-        const resultPromise = (async () => {
-          const stdoutBytes = await new Response(proc.stdout).arrayBuffer();
+        // Stream stdout to builder for real-time interleaved output
+        const readPromise = (async () => {
+          await readStreamToBuilder(proc.stdout as ReadableStream<Uint8Array>, builder);
+          // Also drain stderr (in case anything bypassed 2>&1)
           const stderrBytes = await new Response(proc.stderr).arrayBuffer();
-          return {
-            stdout: new TextDecoder("utf-8", { fatal: false }).decode(
-              stdoutBytes,
-            ),
-            stderr: new TextDecoder("utf-8", { fatal: false }).decode(
-              stderrBytes,
-            ),
-          };
+          const stderrStr = new TextDecoder("utf-8", { fatal: false }).decode(stderrBytes);
+          if (stderrStr) builder.write(stderrStr);
         })();
 
-        const result = await Promise.race([resultPromise, timeoutPromise]);
+        await Promise.race([readPromise, timeoutPromise]);
         if (timeoutId !== null) clearTimeout(timeoutId);
-
-        // Write stdout and stderr
-        if (result.stdout) builder.write(result.stdout);
-        if (result.stderr) builder.write(result.stderr);
 
         await proc.exited;
       } catch (e) {
+        if (timeoutId !== null) clearTimeout(timeoutId);
         if (e instanceof Error && e.message === "timeout") {
           proc.kill();
           timedOut = true;

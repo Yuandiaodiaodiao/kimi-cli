@@ -38,6 +38,38 @@ function resolvePath(filePath: string, workingDir: string): string {
   return `${workingDir}/${filePath}`;
 }
 
+/** Build a simple unified diff for display. */
+function buildSimpleDiff(oldContent: string, newContent: string, path: string): string {
+  const oldLines = oldContent.split("\n");
+  const newLines = newContent.split("\n");
+  const maxPreview = 50; // Max lines to show in diff
+  const diffLines: string[] = [`--- a/${path}`, `+++ b/${path}`];
+
+  // Simple line-by-line diff (show first differences)
+  let shown = 0;
+  const maxLen = Math.max(oldLines.length, newLines.length);
+  for (let i = 0; i < maxLen && shown < maxPreview; i++) {
+    const oldLine = oldLines[i];
+    const newLine = newLines[i];
+    if (oldLine !== newLine) {
+      if (oldLine !== undefined) {
+        diffLines.push(`-${oldLine}`);
+        shown++;
+      }
+      if (newLine !== undefined) {
+        diffLines.push(`+${newLine}`);
+        shown++;
+      }
+    }
+  }
+
+  if (shown >= maxPreview) {
+    diffLines.push(`... (diff truncated, ${maxLen} total lines)`);
+  }
+
+  return diffLines.join("\n");
+}
+
 export class WriteFile extends CallableTool<typeof ParamsSchema> {
   readonly name = "WriteFile";
   readonly description = DESCRIPTION;
@@ -53,23 +85,45 @@ export class WriteFile extends CallableTool<typeof ParamsSchema> {
 
       // Check if parent directory exists
       const parentDir = resolvedPath.replace(/\/[^/]+$/, "");
-      const parentFile = Bun.file(parentDir);
-      // Use a stat check via filesystem
+      const { stat: fsStat, mkdir } = await import("node:fs/promises");
       try {
-        const stat = await Bun.file(parentDir + "/.").exists();
-        // If parent doesn't exist, we try to check differently
-      } catch {
-        // ignore
+        const parentInfo = await fsStat(parentDir);
+        if (!parentInfo.isDirectory()) {
+          return ToolError(`Parent path \`${parentDir}\` exists but is not a directory.`);
+        }
+      } catch (err: any) {
+        if (err?.code === "ENOENT") {
+          // Auto-create parent directories
+          await mkdir(parentDir, { recursive: true });
+        } else {
+          return ToolError(`Cannot access parent directory \`${parentDir}\`: ${err?.message}`);
+        }
       }
 
       const file = Bun.file(resolvedPath);
       const fileExisted = await file.exists();
 
+      // Build diff for approval display
+      let diffPreview = "";
+      if (fileExisted) {
+        try {
+          const oldContent = await file.text();
+          const newContent = params.mode === "append" ? oldContent + params.content : params.content;
+          diffPreview = buildSimpleDiff(oldContent, newContent, params.path);
+        } catch {
+          // Can't read old file — skip diff
+        }
+      }
+
       // Request approval for writes
+      const approvalSummary = fileExisted
+        ? `${params.mode === "append" ? "Append to" : "Overwrite"} file \`${params.path}\`${diffPreview ? `\n${diffPreview}` : ""}`
+        : `Create file \`${params.path}\` (${params.content.length} chars)`;
+
       const decision = await ctx.approval(
         "WriteFile",
         fileExisted ? "edit" : "create",
-        `Write file \`${resolvedPath}\``,
+        approvalSummary,
       );
       if (decision === "reject") {
         return ToolError(
@@ -78,8 +132,8 @@ export class WriteFile extends CallableTool<typeof ParamsSchema> {
       }
 
       if (params.mode === "append" && fileExisted) {
-        const existingContent = await file.text();
-        await Bun.write(resolvedPath, existingContent + params.content);
+        const { appendFile } = await import("node:fs/promises");
+        await appendFile(resolvedPath, params.content, "utf-8");
       } else {
         await Bun.write(resolvedPath, params.content);
       }
@@ -87,7 +141,9 @@ export class WriteFile extends CallableTool<typeof ParamsSchema> {
       const newFile = Bun.file(resolvedPath);
       const fileSize = newFile.size;
       const action =
-        params.mode === "overwrite" ? "overwritten" : "appended to";
+        params.mode === "overwrite"
+          ? (fileExisted ? "overwritten" : "created")
+          : "appended to";
       return {
         isError: false,
         output: "",

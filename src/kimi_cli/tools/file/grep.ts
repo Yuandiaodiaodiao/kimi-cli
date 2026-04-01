@@ -233,6 +233,24 @@ export class Grep extends CallableTool<typeof ParamsSchema> {
         lines = lines.slice(0, -1);
       }
 
+      // Sort files_with_matches by mtime (most recently modified first)
+      if (params.output_mode === "files_with_matches" && lines.length > 0) {
+        const { stat: fsStat } = await import("node:fs/promises");
+        const withMtime = await Promise.all(
+          lines.map(async (filePath) => {
+            try {
+              const fullPath = filePath.startsWith("/") ? filePath : `${searchBase}/${filePath}`;
+              const info = await fsStat(fullPath);
+              return { filePath, mtime: info.mtimeMs };
+            } catch {
+              return { filePath, mtime: 0 };
+            }
+          }),
+        );
+        withMtime.sort((a, b) => b.mtime - a.mtime);
+        lines = withMtime.map((x) => x.filePath);
+      }
+
       // count_matches summary
       if (params.output_mode === "count_matches") {
         let totalMatches = 0;
