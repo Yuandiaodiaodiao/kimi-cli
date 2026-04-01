@@ -58,8 +58,33 @@ export async function saveSessionState(state: SessionState, sessionDir: string):
 
 // ── WorkDir Metadata ────────────────────────────────────
 
+const METADATA_FILE = "metadata.json";
+
 function getSessionsBaseDir(workDir: string): string {
   return join(getShareDir(), "sessions", workDir.replace(/\//g, "_").replace(/^_/, ""));
+}
+
+interface WorkDirMeta {
+  lastSessionId?: string;
+}
+
+async function loadWorkDirMeta(sessionsDir: string): Promise<WorkDirMeta> {
+  const metaFile = join(sessionsDir, METADATA_FILE);
+  try {
+    const file = Bun.file(metaFile);
+    if (await file.exists()) {
+      return await file.json() as WorkDirMeta;
+    }
+  } catch {
+    // ignore corrupt metadata
+  }
+  return {};
+}
+
+async function saveWorkDirMeta(sessionsDir: string, meta: WorkDirMeta): Promise<void> {
+  const metaFile = join(sessionsDir, METADATA_FILE);
+  await Bun.$`mkdir -p ${sessionsDir}`.quiet();
+  await Bun.write(metaFile, JSON.stringify(meta, null, 2));
 }
 
 // ── Session class ───────────────────────────────────────
@@ -131,6 +156,8 @@ export class Session {
   async saveState(): Promise<void> {
     await Bun.$`mkdir -p ${this.dir}`.quiet();
     await saveSessionState(this.state, this.dir);
+    // Track as last session for this workDir
+    await saveWorkDirMeta(this.sessionsDir, { lastSessionId: this.id });
   }
 
   async delete(): Promise<void> {
@@ -268,5 +295,29 @@ export class Session {
 
     sessions.sort((a, b) => b.updatedAt - a.updatedAt);
     return sessions;
+  }
+
+  /**
+   * Continue the most recent session for a workDir.
+   * Returns the last session or null if none exists.
+   */
+  static async continue_(workDir: string): Promise<Session | null> {
+    workDir = resolve(workDir);
+    const sessionsDir = getSessionsBaseDir(workDir);
+
+    // Try metadata first
+    const meta = await loadWorkDirMeta(sessionsDir);
+    if (meta.lastSessionId) {
+      const session = await Session.find(workDir, meta.lastSessionId);
+      if (session) return session;
+    }
+
+    // Fallback: find the most recently updated session
+    const sessions = await Session.list(workDir);
+    if (sessions.length > 0) {
+      return sessions[0]!;
+    }
+
+    return null;
   }
 }

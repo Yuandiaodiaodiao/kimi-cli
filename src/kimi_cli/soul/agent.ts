@@ -200,6 +200,22 @@ export async function loadAgent(opts: {
         return result.approved ? "approve" : "reject";
       },
       wireEmit: () => {}, // Will be wired by KimiSoul
+      serviceConfig: {
+        moonshotSearch: runtime.config.services.moonshot_search
+          ? {
+              baseUrl: runtime.config.services.moonshot_search.base_url,
+              apiKey: runtime.config.services.moonshot_search.api_key,
+              customHeaders: runtime.config.services.moonshot_search.custom_headers,
+            }
+          : undefined,
+        moonshotFetch: runtime.config.services.moonshot_fetch
+          ? {
+              baseUrl: runtime.config.services.moonshot_fetch.base_url,
+              apiKey: runtime.config.services.moonshot_fetch.api_key,
+              customHeaders: runtime.config.services.moonshot_fetch.custom_headers,
+            }
+          : undefined,
+      },
     },
     hookEngine: runtime.hookEngine,
   });
@@ -259,9 +275,11 @@ async function registerBuiltinTools(toolset: KimiToolset): Promise<void> {
     () => import("../tools/file/grep.ts"),
     () => import("../tools/shell/shell.ts"),
     () => import("../tools/web/fetch.ts"),
+    () => import("../tools/web/search.ts"),
     () => import("../tools/think/think.ts"),
     () => import("../tools/ask_user/ask_user.ts"),
     () => import("../tools/todo/todo.ts"),
+    () => import("../tools/plan/plan.ts"),
   ];
 
   for (const loadModule of toolModules) {

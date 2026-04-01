@@ -20,6 +20,17 @@ export interface ToolContext {
   ) => Promise<ApprovalDecision>;
   /** Emit a wire event (for UI communication). */
   wireEmit?: (event: unknown) => void;
+  /** Toggle plan mode on/off. */
+  setPlanMode?: (on: boolean) => void;
+  /** Get current plan mode status. */
+  getPlanMode?: () => boolean;
+  /** Ask the user a question and get the answer (for AskUserQuestion tool). */
+  askUser?: (question: string, options?: string[]) => Promise<string>;
+  /** Access to service config (for SearchWeb, FetchURL). */
+  serviceConfig?: {
+    moonshotSearch?: { baseUrl: string; apiKey: string; customHeaders?: Record<string, string> };
+    moonshotFetch?: { baseUrl: string; apiKey: string; customHeaders?: Record<string, string> };
+  };
 }
 
 // ── ToolResult ──────────────────────────────────────────

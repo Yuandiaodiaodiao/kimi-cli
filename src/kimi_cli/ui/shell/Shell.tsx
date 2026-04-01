@@ -2,19 +2,14 @@
  * Shell.tsx — Main REPL component.
  * Corresponds to Python's ui/shell/__init__.py.
  *
- * Layout:
- * ┌─ WelcomeBox ─────────────────────────┐
- * │  Logo  Welcome to Kimi Code CLI!     │
- * └──────────────────────────────────────┘
- *
- * [Messages...]                    ← middle (flex-grow)
- * ──────────────────────────        ← slash menu (when typing /)
- * ▸ /clear   Clear conversation
- *   /help    Show help
- * ✨ /cl_                           ← input
- *
- * ─────────────────────────────────  ← bottom (hidden when slash menu open)
- * agent (model ●)  ~/dir  context%
+ * Layout logic:
+ * - WelcomeBox: fixed at top (will scroll off when content grows)
+ * - ChatList: height = content lines (grows as messages added)
+ * - InputBox: flexGrow=1 + minHeight=6, fills remaining space
+ *   - text starts from top (row 0)
+ *   - when ChatList grows, InputBox shrinks down to minHeight
+ *   - when InputBox is at minHeight, total layout exceeds screen → scrollable
+ * - StatusBar: always at bottom
  */
 
 import React, { useCallback, useEffect, useState } from "react";
@@ -36,6 +31,8 @@ import { setActiveTheme } from "../theme.ts";
 import type { WireUIEvent } from "./events.ts";
 import type { ApprovalResponseKind } from "../../wire/types.ts";
 import type { SlashCommand } from "../../types.ts";
+
+const INPUT_MIN_HEIGHT = 6;
 
 /** Deduplicate commands by name, shell commands take priority */
 function deduplicateCommands(commands: SlashCommand[]): SlashCommand[] {
@@ -149,9 +146,12 @@ export function Shell({
     [wire.pendingApproval, onApprovalResponse, wire],
   );
 
+  // Calculate status bar height (separator + 2 lines of status)
+  const statusBarHeight = slashMenuVisible ? 0 : 3;
+
   return (
-    <Box flexDirection="column" height={termHeight}>
-      {/* ═══ Top: Welcome box (fixed) ═══ */}
+    <Box flexDirection="column" minHeight={termHeight}>
+      {/* ═══ Top: Welcome box ═══ */}
       <WelcomeBox
         workDir={workDir}
         sessionId={sessionId}
@@ -159,42 +159,44 @@ export function Shell({
         tip="Spot a bug or have feedback? Type /feedback right in this session — every report makes Kimi better."
       />
 
-      {/* ═══ Middle: ChatList + InputBox ═══ */}
-      <Box flexDirection="column" flexGrow={1}>
-        {/* ChatList: height = content height (no flexGrow) */}
-        <Box flexDirection="column">
-          <MessageList
-            messages={wire.messages}
-            isStreaming={wire.isStreaming}
+      {/* ═══ ChatList: height follows content ═══ */}
+      <Box flexDirection="column" flexShrink={0}>
+        <MessageList
+          messages={wire.messages}
+          isStreaming={wire.isStreaming}
+        />
+
+        {wire.isStreaming && !wire.isCompacting && (
+          <StreamingSpinner stepCount={wire.stepCount} />
+        )}
+
+        <CompactionSpinner active={wire.isCompacting} />
+
+        {wire.pendingApproval && (
+          <ApprovalPrompt
+            request={wire.pendingApproval}
+            onRespond={handleApprovalResponse}
           />
-
-          {wire.isStreaming && !wire.isCompacting && (
-            <StreamingSpinner stepCount={wire.stepCount} />
-          )}
-
-          <CompactionSpinner active={wire.isCompacting} />
-
-          {wire.pendingApproval && (
-            <ApprovalPrompt
-              request={wire.pendingApproval}
-              onRespond={handleApprovalResponse}
-            />
-          )}
-        </Box>
-
-        {/* InputBox: flexGrow=1 fills remaining space, text aligned to top */}
-        <Box flexDirection="column" flexGrow={1}>
-          <Prompt
-            onSubmit={handleSubmit}
-            disabled={wire.isStreaming || !!wire.pendingApproval}
-            isStreaming={wire.isStreaming}
-            commands={allCommands}
-            onSlashMenuChange={setSlashMenuVisible}
-          />
-        </Box>
+        )}
       </Box>
 
-      {/* Bottom: Status bar — hidden when slash menu is open */}
+      {/* ═══ InputBox: fills remaining, min 6 lines, text at top ═══ */}
+      <Box
+        flexDirection="column"
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={INPUT_MIN_HEIGHT}
+      >
+        <Prompt
+          onSubmit={handleSubmit}
+          disabled={false}
+          isStreaming={wire.isStreaming}
+          commands={allCommands}
+          onSlashMenuChange={setSlashMenuVisible}
+        />
+      </Box>
+
+      {/* ═══ Bottom: Status bar (always visible, hidden when slash menu) ═══ */}
       {!slashMenuVisible && (
         <StatusBar
           modelName={modelName}

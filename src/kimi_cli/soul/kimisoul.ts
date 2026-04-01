@@ -607,4 +607,11 @@ export class KimiSoul {
       };
     }
   }
+
+  /** Wire tool context callbacks (plan mode, ask user, etc.) to the soul. */
+  wireToolContext(): void {
+    const ctx = this.agent.toolset.context;
+    ctx.setPlanMode = (on: boolean) => this.setPlanMode(on);
+    ctx.getPlanMode = () => this._planMode;
+  }
 }

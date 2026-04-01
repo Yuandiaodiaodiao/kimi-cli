@@ -185,6 +185,9 @@ export class KimiCLI {
     // Wire slash commands
     soul.wireSlashCommands();
 
+    // Wire tool context (plan mode, ask user, etc.)
+    soul.wireToolContext();
+
     return new KimiCLI({
       soul,
       agent,

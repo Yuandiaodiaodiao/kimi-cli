@@ -125,21 +125,15 @@ export function Prompt({
 
   return (
     <Box flexDirection="column">
-      {/* Input line — always on top */}
+      {/* Input line — always rendered, always on top */}
       <Box>
-        <Text>✨ </Text>
-        {disabled ? (
-          <Text color="#888888">
-            {isStreaming ? "Agent is responding..." : "Processing..."}
-          </Text>
-        ) : (
-          <TextInput
-            value={value}
-            onChange={handleChange}
-            onSubmit={handleSubmit}
-            placeholder={placeholder}
-          />
-        )}
+        <Text>{isStreaming ? "🔄 " : "✨ "}</Text>
+        <TextInput
+          value={value}
+          onChange={handleChange}
+          onSubmit={handleSubmit}
+          placeholder={isStreaming ? "Type to steer the agent..." : placeholder}
+        />
       </Box>
 
       {/* Slash command menu — renders below input, pushes up from bottom */}
