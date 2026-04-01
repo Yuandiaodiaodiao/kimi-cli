@@ -67,6 +67,9 @@ program
           const { waitUntilExit } = render(
             React.createElement(Shell, {
               modelName: app.soul.modelName,
+              workDir: options.workDir ?? process.cwd(),
+              sessionId: app.session.id,
+              thinking: app.soul.thinking,
               onSubmit: (input: string) => {
                 app.soul.run(input);
               },

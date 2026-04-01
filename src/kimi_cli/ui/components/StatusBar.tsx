@@ -1,120 +1,108 @@
 /**
  * StatusBar component — bottom status bar.
- * Corresponds to the bottom toolbar in Python's prompt.py.
+ * Matches Python's toolbar: separator line + single status line.
  *
- * Displays: model name, token count, context usage, session id
+ * Layout:
+ * ──────────────────────────────────────────────────────
+ * agent (kimi-k2.5 ●)  ~/workdir  main    context: 0.0%
  */
 
 import React from "react";
-import { Box, Text } from "ink";
-import { getToolbarColors, getMessageColors } from "../theme";
+import { Box, Text, useStdout } from "ink";
 import type { StatusUpdate } from "../../wire/types";
+
+const DIM = "#888888";
 
 interface StatusBarProps {
   modelName?: string;
+  workDir?: string;
   status: StatusUpdate | null;
   isStreaming: boolean;
   stepCount: number;
   isCompacting?: boolean;
   planMode?: boolean;
+  yolo?: boolean;
+  thinking?: boolean;
 }
 
 export function StatusBar({
   modelName = "",
+  workDir,
   status,
   isStreaming,
   stepCount,
   isCompacting = false,
   planMode = false,
+  yolo = false,
+  thinking = false,
 }: StatusBarProps) {
-  const toolbar = getToolbarColors();
-  const colors = getMessageColors();
+  const { stdout } = useStdout();
+  const columns = stdout?.columns ?? 80;
 
   // Context usage
   const contextUsage = status?.context_usage;
-  const contextTokens = status?.context_tokens;
-  const maxContextTokens = status?.max_context_tokens;
+  const contextPercent =
+    contextUsage != null ? (contextUsage * 100).toFixed(1) : "0.0";
 
-  // Token usage
-  const tokenUsage = status?.token_usage;
-  const inputTokens = tokenUsage?.inputTokens ?? 0;
-  const outputTokens = tokenUsage?.outputTokens ?? 0;
+  // Shorten workDir
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const displayDir = workDir
+    ? workDir.startsWith(home)
+      ? "~" + workDir.slice(home.length)
+      : workDir
+    : "";
 
-  // Format context bar
-  const contextPercent = contextUsage != null ? Math.round(contextUsage * 100) : null;
-  const contextColor =
-    contextPercent != null
-      ? contextPercent > 80
-        ? colors.error
-        : contextPercent > 60
-          ? "#f2cc60"
-          : colors.dim
-      : colors.dim;
+  // Build left section: [yolo] [plan] agent (model ●)
+  const leftParts: string[] = [];
+  if (yolo) leftParts.push("yolo");
+  if (planMode) leftParts.push("plan");
+
+  const thinkingDot = thinking ? "●" : "○";
+  const modeStr = modelName
+    ? `agent (${modelName} ${thinkingDot})`
+    : "agent";
+  leftParts.push(modeStr);
+  const leftText = leftParts.join("  ");
+
+  // Build right section
+  const rightText = `context: ${contextPercent}%`;
+
+  // Separator
+  const separator = "─".repeat(columns);
 
   return (
-    <Box
-      borderStyle="single"
-      borderColor={toolbar.separator}
-      paddingX={1}
-      justifyContent="space-between"
-    >
-      <Box gap={2}>
-        {/* Model name */}
-        {modelName && (
-          <Text color={colors.assistant} bold>
-            {modelName}
+    <Box flexDirection="column">
+      <Text color={DIM}>{separator}</Text>
+      <Box justifyContent="space-between">
+        <Box gap={2}>
+          {yolo && (
+            <Text color="yellow" bold>
+              yolo
+            </Text>
+          )}
+          {planMode && (
+            <Text color="magenta" bold>
+              plan
+            </Text>
+          )}
+          <Text>{modeStr}</Text>
+          {displayDir && <Text color={DIM}>{displayDir}</Text>}
+          {isStreaming && (
+            <Text color="#1e90ff">step {stepCount}</Text>
+          )}
+          {isCompacting && <Text color="yellow">compacting...</Text>}
+        </Box>
+        <Box gap={2}>
+          <Text color={DIM}>
+            shift-tab: plan mode | ctrl-o: editor
           </Text>
-        )}
-
-        {/* Plan mode indicator */}
-        {planMode && (
-          <Text color={toolbar.planLabel} bold>
-            [PLAN]
-          </Text>
-        )}
-
-        {/* Streaming indicator */}
-        {isStreaming && (
-          <Text color={colors.highlight}>
-            ● Step {stepCount}
-          </Text>
-        )}
-
-        {/* Compacting indicator */}
-        {isCompacting && (
-          <Text color="#f2cc60">
-            ⟳ Compacting...
-          </Text>
-        )}
-      </Box>
-
-      <Box gap={2}>
-        {/* Token count */}
-        {(inputTokens > 0 || outputTokens > 0) && (
-          <Text color={colors.dim}>
-            ↑{formatTokenCount(inputTokens)} ↓{formatTokenCount(outputTokens)}
-          </Text>
-        )}
-
-        {/* Context usage */}
-        {contextPercent != null && (
-          <Text color={contextColor}>
-            ctx: {contextPercent}%
-            {contextTokens != null && maxContextTokens != null && (
-              <Text color={colors.dim}>
-                {" "}({formatTokenCount(contextTokens)}/{formatTokenCount(maxContextTokens)})
-              </Text>
-            )}
-          </Text>
-        )}
+          <Text color={DIM}>{rightText}</Text>
+        </Box>
       </Box>
     </Box>
   );
 }
 
-/**
- * Format token count for display (e.g., 1234 → "1.2k", 1234567 → "1.2M")
- */
 function formatTokenCount(count: number): string {
   if (count < 1000) return String(count);
   if (count < 1_000_000) return `${(count / 1000).toFixed(1)}k`;

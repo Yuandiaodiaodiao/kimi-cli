@@ -2,50 +2,59 @@
  * Shell.tsx — Main REPL component.
  * Corresponds to Python's ui/shell/__init__.py.
  *
- * Root Ink component managing overall layout:
- * - MessageList (flex-grow) → StatusBar → InputPrompt (bottom)
- * - Connects to Wire EventBus for agent events
- * - Handles slash command routing
+ * Layout (matching Python):
+ * ┌─ WelcomeBox ─────────────────────────┐
+ * │  Logo  Welcome to Kimi Code CLI!     │
+ * │  Directory / Session / Model          │
+ * └──────────────────────────────────────┘
+ *
+ * [MessageList - scrollable]
+ *
+ * ─────────────────────────────────────────
+ * agent (model ●)  ~/dir  branch  context: 0.0%
+ * ✨ _
  */
 
 import React, { useCallback, useEffect, useState } from "react";
 import { Box, Text, useApp, useStdout } from "ink";
-import { MessageList } from "./Visualize";
-import { Prompt } from "./Prompt";
-import { StatusBar } from "../components/StatusBar";
-import { ApprovalPrompt } from "../components/ApprovalPrompt";
-import { StreamingSpinner, CompactionSpinner } from "../components/Spinner";
-import { useWire } from "../hooks/useWire";
-import { useKeyboard } from "./keyboard";
+import { MessageList } from "./Visualize.tsx";
+import { Prompt } from "./Prompt.tsx";
+import { WelcomeBox } from "../components/WelcomeBox.tsx";
+import { StatusBar } from "../components/StatusBar.tsx";
+import { ApprovalPrompt } from "../components/ApprovalPrompt.tsx";
+import { StreamingSpinner, CompactionSpinner } from "../components/Spinner.tsx";
+import { useWire } from "../hooks/useWire.ts";
+import { useKeyboard } from "./keyboard.ts";
 import {
   createShellSlashCommands,
   parseSlashCommand,
   findSlashCommand,
-} from "./slash";
-import { setActiveTheme } from "../theme";
-import type { WireUIEvent } from "./events";
-import type { ApprovalResponseKind } from "../../wire/types";
-import type { SlashCommand } from "../../types";
+} from "./slash.ts";
+import { setActiveTheme } from "../theme.ts";
+import type { WireUIEvent } from "./events.ts";
+import type { ApprovalResponseKind } from "../../wire/types.ts";
+import type { SlashCommand } from "../../types.ts";
 
 export interface ShellProps {
-  /** Model name to display in status bar */
   modelName?: string;
-  /** Callback when user submits a message to the agent */
+  workDir?: string;
+  sessionId?: string;
+  thinking?: boolean;
   onSubmit?: (input: string) => void;
-  /** Callback when approval is responded to */
   onApprovalResponse?: (
     requestId: string,
     decision: ApprovalResponseKind,
     feedback?: string,
   ) => void;
-  /** External event source — provides pushEvent callback */
   onWireReady?: (pushEvent: (event: WireUIEvent) => void) => void;
-  /** Additional slash commands from soul/agent level */
   extraSlashCommands?: SlashCommand[];
 }
 
 export function Shell({
   modelName = "",
+  workDir,
+  sessionId,
+  thinking = false,
   onSubmit,
   onApprovalResponse,
   onWireReady,
@@ -69,32 +78,24 @@ export function Shell({
 
   // Handle terminal resize
   useEffect(() => {
-    const onResize = () => {
-      setTermHeight(stdout?.rows || 24);
-    };
+    const onResize = () => setTermHeight(stdout?.rows || 24);
     stdout?.on("resize", onResize);
-    return () => {
-      stdout?.off("resize", onResize);
-    };
+    return () => { stdout?.off("resize", onResize); };
   }, [stdout]);
 
   // Keyboard handling
   useKeyboard({
     onAction: (action) => {
-      if (action === "interrupt") {
-        if (wire.isStreaming) {
-          // Send interrupt to agent
-          wire.pushEvent({ type: "error", message: "Interrupted by user" });
-        }
+      if (action === "interrupt" && wire.isStreaming) {
+        wire.pushEvent({ type: "error", message: "Interrupted by user" });
       }
     },
-    active: false, // Prompt handles its own input
+    active: false,
   });
 
-  // Handle user input submission
+  // Handle user input
   const handleSubmit = useCallback(
     (input: string) => {
-      // Check for slash commands first
       const parsed = parseSlashCommand(input);
       if (parsed) {
         const cmd = findSlashCommand(allCommands, parsed.name);
@@ -102,7 +103,6 @@ export function Shell({
           cmd.handler(parsed.args);
           return;
         }
-        // Unknown slash command — send as regular message with warning
         wire.pushEvent({
           type: "notification",
           title: "Unknown command",
@@ -110,8 +110,6 @@ export function Shell({
         });
         return;
       }
-
-      // Regular message — send to agent
       onSubmit?.(input);
     },
     [allCommands, onSubmit, wire],
@@ -134,6 +132,14 @@ export function Shell({
 
   return (
     <Box flexDirection="column" height={termHeight}>
+      {/* Welcome box - always shown at top */}
+      <WelcomeBox
+        workDir={workDir}
+        sessionId={sessionId}
+        modelName={modelName}
+        tip="Spot a bug or have feedback? Type /feedback right in this session — every report makes Kimi better."
+      />
+
       {/* Message area (flex-grow) */}
       <Box flexDirection="column" flexGrow={1} overflow="hidden">
         <MessageList messages={wire.messages} isStreaming={wire.isStreaming} />
@@ -147,7 +153,7 @@ export function Shell({
         <CompactionSpinner active={wire.isCompacting} />
       </Box>
 
-      {/* Approval prompt (modal overlay) */}
+      {/* Approval prompt (modal) */}
       {wire.pendingApproval && (
         <ApprovalPrompt
           request={wire.pendingApproval}
@@ -155,17 +161,19 @@ export function Shell({
         />
       )}
 
-      {/* Status bar */}
+      {/* Status bar: separator + status line */}
       <StatusBar
         modelName={modelName}
+        workDir={workDir}
         status={wire.status}
         isStreaming={wire.isStreaming}
         stepCount={wire.stepCount}
         isCompacting={wire.isCompacting}
         planMode={wire.status?.plan_mode ?? false}
+        thinking={thinking}
       />
 
-      {/* Input prompt */}
+      {/* Input prompt with ✨ */}
       <Prompt
         onSubmit={handleSubmit}
         disabled={wire.isStreaming || !!wire.pendingApproval}

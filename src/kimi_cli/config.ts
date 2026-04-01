@@ -4,7 +4,7 @@
  */
 
 import { z } from "zod/v4";
-import TOML from "smol-toml";
+import * as TOML from "smol-toml";
 import { ModelCapability } from "./types.ts";
 
 // ── Sub-schemas ─────────────────────────────────────────
