@@ -151,7 +151,7 @@ export function Shell({
 
   return (
     <Box flexDirection="column" height={termHeight}>
-      {/* Top: Welcome box */}
+      {/* ═══ Top: Welcome box (fixed) ═══ */}
       <WelcomeBox
         workDir={workDir}
         sessionId={sessionId}
@@ -159,42 +159,39 @@ export function Shell({
         tip="Spot a bug or have feedback? Type /feedback right in this session — every report makes Kimi better."
       />
 
-      {/*
-       * Middle: unified content flow (flex-grow).
-       * Messages + input in one stream, content starts from top,
-       * empty space below naturally fills remaining height.
-       */}
-      <Box flexDirection="column" flexGrow={1} overflow="hidden">
-        {/* Messages */}
-        <MessageList
-          messages={wire.messages}
-          isStreaming={wire.isStreaming}
-        />
-
-        {/* Streaming indicator */}
-        {wire.isStreaming && !wire.isCompacting && (
-          <StreamingSpinner stepCount={wire.stepCount} />
-        )}
-
-        {/* Compaction indicator */}
-        <CompactionSpinner active={wire.isCompacting} />
-
-        {/* Approval prompt (modal) */}
-        {wire.pendingApproval && (
-          <ApprovalPrompt
-            request={wire.pendingApproval}
-            onRespond={handleApprovalResponse}
+      {/* ═══ Middle: ChatList + InputBox ═══ */}
+      <Box flexDirection="column" flexGrow={1}>
+        {/* ChatList: height = content height (no flexGrow) */}
+        <Box flexDirection="column">
+          <MessageList
+            messages={wire.messages}
+            isStreaming={wire.isStreaming}
           />
-        )}
 
-        {/* Input prompt ✨ — in the same flow as messages */}
-        <Prompt
-          onSubmit={handleSubmit}
-          disabled={wire.isStreaming || !!wire.pendingApproval}
-          isStreaming={wire.isStreaming}
-          commands={allCommands}
-          onSlashMenuChange={setSlashMenuVisible}
-        />
+          {wire.isStreaming && !wire.isCompacting && (
+            <StreamingSpinner stepCount={wire.stepCount} />
+          )}
+
+          <CompactionSpinner active={wire.isCompacting} />
+
+          {wire.pendingApproval && (
+            <ApprovalPrompt
+              request={wire.pendingApproval}
+              onRespond={handleApprovalResponse}
+            />
+          )}
+        </Box>
+
+        {/* InputBox: flexGrow=1 fills remaining space, text aligned to top */}
+        <Box flexDirection="column" flexGrow={1}>
+          <Prompt
+            onSubmit={handleSubmit}
+            disabled={wire.isStreaming || !!wire.pendingApproval}
+            isStreaming={wire.isStreaming}
+            commands={allCommands}
+            onSlashMenuChange={setSlashMenuVisible}
+          />
+        </Box>
       </Box>
 
       {/* Bottom: Status bar — hidden when slash menu is open */}

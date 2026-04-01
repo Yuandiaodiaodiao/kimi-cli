@@ -75,6 +75,17 @@ export class StrReplaceFile extends CallableTool<typeof ParamsSchema> {
         return ToolError(`\`${params.path}\` does not exist.`);
       }
 
+      // Check if it's actually a file
+      const { stat: fsStat } = await import("node:fs/promises");
+      try {
+        const info = await fsStat(resolvedPath);
+        if (!info.isFile()) {
+          return ToolError(`\`${params.path}\` is not a file.`);
+        }
+      } catch {
+        // stat failed — continue
+      }
+
       // Read the file content
       const originalContent = await file.text();
       let content = originalContent;
@@ -95,11 +106,20 @@ export class StrReplaceFile extends CallableTool<typeof ParamsSchema> {
         );
       }
 
-      // Request approval
+      // Request approval — include diff preview
+      const diffLines: string[] = [];
+      for (const edit of edits) {
+        if (edit.old.length < 200 && edit.new.length < 200) {
+          diffLines.push(`-${edit.old.split("\n").join("\n-")}`);
+          diffLines.push(`+${edit.new.split("\n").join("\n+")}`);
+        }
+      }
+      const diffPreview = diffLines.length > 0 ? `\n${diffLines.join("\n")}` : "";
+
       const decision = await ctx.approval(
         "StrReplaceFile",
         "edit",
-        `Edit file \`${resolvedPath}\``,
+        `Edit file \`${resolvedPath}\` (${edits.length} edit(s))${diffPreview}`,
       );
       if (decision === "reject") {
         return ToolError(
