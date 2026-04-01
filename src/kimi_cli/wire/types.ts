@@ -1,0 +1,510 @@
+/**
+ * Wire event types — corresponds to Python's wire/types.py
+ * Uses Zod v4 discriminated unions for runtime validation.
+ */
+
+import { z } from "zod/v4";
+import {
+  ContentPart,
+  TokenUsage,
+  ToolCall,
+  ToolReturnValue,
+  type JsonValue,
+} from "../types";
+
+// ── Display Blocks ─────────────────────────────────────────
+
+export const BriefDisplayBlock = z.object({
+  type: z.literal("brief"),
+  brief: z.string(),
+});
+export type BriefDisplayBlock = z.infer<typeof BriefDisplayBlock>;
+
+export const DiffDisplayBlock = z.object({
+  type: z.literal("diff"),
+  path: z.string(),
+  old_text: z.string(),
+  new_text: z.string(),
+  old_start: z.number().default(1),
+  new_start: z.number().default(1),
+  is_summary: z.boolean().default(false),
+});
+export type DiffDisplayBlock = z.infer<typeof DiffDisplayBlock>;
+
+export const TodoDisplayItem = z.object({
+  title: z.string(),
+  status: z.enum(["pending", "in_progress", "done"]),
+});
+export type TodoDisplayItem = z.infer<typeof TodoDisplayItem>;
+
+export const TodoDisplayBlock = z.object({
+  type: z.literal("todo"),
+  items: z.array(TodoDisplayItem),
+});
+export type TodoDisplayBlock = z.infer<typeof TodoDisplayBlock>;
+
+export const ShellDisplayBlock = z.object({
+  type: z.literal("shell"),
+  language: z.string(),
+  command: z.string(),
+});
+export type ShellDisplayBlock = z.infer<typeof ShellDisplayBlock>;
+
+export const BackgroundTaskDisplayBlock = z.object({
+  type: z.literal("background_task"),
+  task_id: z.string(),
+  kind: z.string(),
+  status: z.string(),
+  description: z.string(),
+});
+export type BackgroundTaskDisplayBlock = z.infer<
+  typeof BackgroundTaskDisplayBlock
+>;
+
+export const UnknownDisplayBlock = z.object({
+  type: z.string(),
+}).passthrough();
+export type UnknownDisplayBlock = z.infer<typeof UnknownDisplayBlock>;
+
+export const DisplayBlock = z.union([
+  BriefDisplayBlock,
+  DiffDisplayBlock,
+  TodoDisplayBlock,
+  ShellDisplayBlock,
+  BackgroundTaskDisplayBlock,
+  UnknownDisplayBlock,
+]);
+export type DisplayBlock = z.infer<typeof DisplayBlock>;
+
+// ── Wire Event Types ───────────────────────────────────────
+
+/** Beginning of a new agent turn. Must be sent before any other event. */
+export const TurnBegin = z.object({
+  user_input: z.union([z.string(), z.array(ContentPart)]),
+});
+export type TurnBegin = z.infer<typeof TurnBegin>;
+
+/** User appended follow-up input to the current running turn. */
+export const SteerInput = z.object({
+  user_input: z.union([z.string(), z.array(ContentPart)]),
+});
+export type SteerInput = z.infer<typeof SteerInput>;
+
+/** End of the current agent turn. */
+export const TurnEnd = z.object({});
+export type TurnEnd = z.infer<typeof TurnEnd>;
+
+/** Beginning of a new agent step. */
+export const StepBegin = z.object({
+  n: z.number(),
+});
+export type StepBegin = z.infer<typeof StepBegin>;
+
+/** Current step was interrupted. */
+export const StepInterrupted = z.object({});
+export type StepInterrupted = z.infer<typeof StepInterrupted>;
+
+/** Compaction just began. */
+export const CompactionBegin = z.object({});
+export type CompactionBegin = z.infer<typeof CompactionBegin>;
+
+/** Compaction just ended. */
+export const CompactionEnd = z.object({});
+export type CompactionEnd = z.infer<typeof CompactionEnd>;
+
+/** A batch of hooks has been triggered and is now executing. */
+export const HookTriggered = z.object({
+  event: z.string(),
+  target: z.string().default(""),
+  hook_count: z.number().default(1),
+});
+export type HookTriggered = z.infer<typeof HookTriggered>;
+
+/** A batch of hooks has finished executing. */
+export const HookResolved = z.object({
+  event: z.string(),
+  target: z.string().default(""),
+  action: z.enum(["allow", "block"]).default("allow"),
+  reason: z.string().default(""),
+  duration_ms: z.number().default(0),
+});
+export type HookResolved = z.infer<typeof HookResolved>;
+
+/** MCP tool loading is in progress. */
+export const MCPLoadingBegin = z.object({});
+export type MCPLoadingBegin = z.infer<typeof MCPLoadingBegin>;
+
+/** MCP tool loading has finished. */
+export const MCPLoadingEnd = z.object({});
+export type MCPLoadingEnd = z.infer<typeof MCPLoadingEnd>;
+
+/** Snapshot of one MCP server during startup. */
+export const MCPServerSnapshot = z.object({
+  name: z.string(),
+  status: z.enum([
+    "pending",
+    "connecting",
+    "connected",
+    "failed",
+    "unauthorized",
+  ]),
+  tools: z.array(z.string()).default([]),
+});
+export type MCPServerSnapshot = z.infer<typeof MCPServerSnapshot>;
+
+/** Snapshot of MCP startup progress. */
+export const MCPStatusSnapshot = z.object({
+  loading: z.boolean(),
+  connected: z.number(),
+  total: z.number(),
+  tools: z.number(),
+  servers: z.array(MCPServerSnapshot).default([]),
+});
+export type MCPStatusSnapshot = z.infer<typeof MCPStatusSnapshot>;
+
+/** Status update on the current state of the soul. None fields = no change. */
+export const StatusUpdate = z.object({
+  context_usage: z.number().nullable().default(null),
+  context_tokens: z.number().nullable().default(null),
+  max_context_tokens: z.number().nullable().default(null),
+  token_usage: TokenUsage.nullable().default(null),
+  message_id: z.string().nullable().default(null),
+  plan_mode: z.boolean().nullable().default(null),
+  mcp_status: MCPStatusSnapshot.nullable().default(null),
+});
+export type StatusUpdate = z.infer<typeof StatusUpdate>;
+
+/** Generic system notification. */
+export const Notification = z.object({
+  id: z.string(),
+  category: z.string(),
+  type: z.string(),
+  source_kind: z.string(),
+  source_id: z.string(),
+  title: z.string(),
+  body: z.string(),
+  severity: z.string(),
+  created_at: z.number(),
+  payload: z.record(z.string(), z.unknown()).default({}),
+});
+export type Notification = z.infer<typeof Notification>;
+
+/** Displays a plan's content inline in the chat. */
+export const PlanDisplay = z.object({
+  content: z.string(),
+  file_path: z.string(),
+});
+export type PlanDisplay = z.infer<typeof PlanDisplay>;
+
+// ── Content Part types (re-exported from types.ts) ─────────
+
+export const TextPart = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+});
+
+export const ThinkPart = z.object({
+  type: z.literal("think"),
+  text: z.string(),
+});
+
+export const ImageURLPart = z.object({
+  type: z.literal("image"),
+  source: z.object({
+    type: z.enum(["base64", "url"]),
+    mediaType: z.string().optional(),
+    data: z.string(),
+  }),
+});
+
+export const ToolCallPart = z.object({
+  type: z.literal("tool_use"),
+  id: z.string(),
+  name: z.string(),
+  input: z.record(z.string(), z.unknown()),
+});
+
+// ── ToolResult ─────────────────────────────────────────────
+
+export const ToolResult = z.object({
+  tool_call_id: z.string(),
+  return_value: ToolReturnValue,
+  display: z.array(DisplayBlock).default([]),
+});
+export type ToolResult = z.infer<typeof ToolResult>;
+
+// ── Approval ───────────────────────────────────────────────
+
+export const ApprovalResponseKind = z.enum([
+  "approve",
+  "approve_for_session",
+  "reject",
+]);
+export type ApprovalResponseKind = z.infer<typeof ApprovalResponseKind>;
+
+export const ApprovalResponse = z.object({
+  request_id: z.string(),
+  response: ApprovalResponseKind,
+  feedback: z.string().default(""),
+});
+export type ApprovalResponse = z.infer<typeof ApprovalResponse>;
+
+export const ApprovalRequest = z.object({
+  id: z.string(),
+  tool_call_id: z.string(),
+  sender: z.string(),
+  action: z.string(),
+  description: z.string(),
+  source_kind: z
+    .enum(["foreground_turn", "background_agent"])
+    .nullable()
+    .default(null),
+  source_id: z.string().nullable().default(null),
+  agent_id: z.string().nullable().default(null),
+  subagent_type: z.string().nullable().default(null),
+  source_description: z.string().nullable().default(null),
+  display: z.array(DisplayBlock).default([]),
+});
+export type ApprovalRequest = z.infer<typeof ApprovalRequest>;
+
+// ── Question ───────────────────────────────────────────────
+
+export const QuestionOption = z.object({
+  label: z.string(),
+  description: z.string().default(""),
+});
+export type QuestionOption = z.infer<typeof QuestionOption>;
+
+export const QuestionItem = z.object({
+  question: z.string(),
+  header: z.string().default(""),
+  options: z.array(QuestionOption),
+  multi_select: z.boolean().default(false),
+  body: z.string().default(""),
+  other_label: z.string().default(""),
+  other_description: z.string().default(""),
+});
+export type QuestionItem = z.infer<typeof QuestionItem>;
+
+export const QuestionResponse = z.object({
+  request_id: z.string(),
+  answers: z.record(z.string(), z.string()),
+});
+export type QuestionResponse = z.infer<typeof QuestionResponse>;
+
+export const QuestionRequest = z.object({
+  id: z.string(),
+  tool_call_id: z.string(),
+  questions: z.array(QuestionItem),
+});
+export type QuestionRequest = z.infer<typeof QuestionRequest>;
+
+export class QuestionNotSupported extends Error {
+  constructor() {
+    super("Connected client does not support interactive questions");
+    this.name = "QuestionNotSupported";
+  }
+}
+
+// ── Tool Call Request ──────────────────────────────────────
+
+export const ToolCallRequest = z.object({
+  id: z.string(),
+  name: z.string(),
+  arguments: z.string().nullable(),
+});
+export type ToolCallRequest = z.infer<typeof ToolCallRequest>;
+
+// ── Hook ───────────────────────────────────────────────────
+
+export const HookResponse = z.object({
+  request_id: z.string(),
+  action: z.enum(["allow", "block"]).default("allow"),
+  reason: z.string().default(""),
+});
+export type HookResponse = z.infer<typeof HookResponse>;
+
+export const HookRequest = z.object({
+  id: z.string(),
+  subscription_id: z.string().default(""),
+  event: z.string(),
+  target: z.string().default(""),
+  input_data: z.record(z.string(), z.unknown()).default({}),
+});
+export type HookRequest = z.infer<typeof HookRequest>;
+
+// ── SubagentEvent (forward reference handled via lazy parsing) ──
+
+export const SubagentEvent = z.object({
+  parent_tool_call_id: z.string().nullable().default(null),
+  agent_id: z.string().nullable().default(null),
+  subagent_type: z.string().nullable().default(null),
+  event: z.record(z.string(), z.unknown()), // envelope: { type, payload }
+});
+export type SubagentEvent = z.infer<typeof SubagentEvent>;
+
+// ── Union Types ────────────────────────────────────────────
+
+/**
+ * All possible event types sent over the Wire.
+ * Events are fire-and-forget; they do not expect a response.
+ */
+export type Event =
+  | TurnBegin
+  | SteerInput
+  | TurnEnd
+  | StepBegin
+  | StepInterrupted
+  | HookTriggered
+  | HookResolved
+  | CompactionBegin
+  | CompactionEnd
+  | MCPLoadingBegin
+  | MCPLoadingEnd
+  | StatusUpdate
+  | Notification
+  | PlanDisplay
+  | ApprovalResponse
+  | SubagentEvent
+  | ToolResult;
+
+/**
+ * All possible request types. Requests expect a response.
+ */
+export type Request =
+  | ApprovalRequest
+  | ToolCallRequest
+  | QuestionRequest
+  | HookRequest;
+
+/**
+ * Any message sent over the Wire.
+ */
+export type WireMessage = Event | Request;
+
+// ── Name → Schema registry ────────────────────────────────
+
+const _wireMessageSchemas: Record<string, z.ZodType<unknown>> = {
+  TurnBegin,
+  SteerInput,
+  TurnEnd,
+  StepBegin,
+  StepInterrupted,
+  CompactionBegin,
+  CompactionEnd,
+  HookTriggered,
+  HookResolved,
+  MCPLoadingBegin,
+  MCPLoadingEnd,
+  StatusUpdate,
+  Notification,
+  PlanDisplay,
+  ApprovalResponse,
+  SubagentEvent,
+  ToolResult,
+  // Requests
+  ApprovalRequest,
+  ToolCallRequest,
+  QuestionRequest,
+  HookRequest,
+  // Content parts (also valid events in Python)
+  TextPart,
+  ThinkPart,
+  ImageURLPart,
+  ToolCallPart,
+  ToolCall,
+  // Backwards compatibility
+  ApprovalRequestResolved: ApprovalResponse,
+};
+
+/** Known event type names (fire-and-forget). */
+const _eventTypeNames = new Set([
+  "TurnBegin",
+  "SteerInput",
+  "TurnEnd",
+  "StepBegin",
+  "StepInterrupted",
+  "CompactionBegin",
+  "CompactionEnd",
+  "HookTriggered",
+  "HookResolved",
+  "MCPLoadingBegin",
+  "MCPLoadingEnd",
+  "StatusUpdate",
+  "Notification",
+  "PlanDisplay",
+  "ApprovalResponse",
+  "SubagentEvent",
+  "ToolResult",
+  "TextPart",
+  "ThinkPart",
+  "ImageURLPart",
+  "ToolCallPart",
+  "ToolCall",
+  "ApprovalRequestResolved",
+]);
+
+/** Known request type names (expect a response). */
+const _requestTypeNames = new Set([
+  "ApprovalRequest",
+  "ToolCallRequest",
+  "QuestionRequest",
+  "HookRequest",
+]);
+
+// ── WireMessageEnvelope ────────────────────────────────────
+
+export const WireMessageEnvelopeSchema = z.object({
+  type: z.string(),
+  payload: z.record(z.string(), z.unknown()),
+});
+export type WireMessageEnvelope = z.infer<typeof WireMessageEnvelopeSchema>;
+
+/**
+ * Create an envelope from a typed wire message.
+ */
+export function toEnvelope(
+  typeName: string,
+  payload: Record<string, unknown>
+): WireMessageEnvelope {
+  return { type: typeName, payload };
+}
+
+/**
+ * Parse an envelope back into a validated WireMessage.
+ * Returns the parsed object and its type name.
+ */
+export function fromEnvelope(envelope: WireMessageEnvelope): {
+  typeName: string;
+  message: unknown;
+} {
+  const schema = _wireMessageSchemas[envelope.type];
+  if (!schema) {
+    throw new Error(`Unknown wire message type: ${envelope.type}`);
+  }
+  const message = schema.parse(envelope.payload);
+  return { typeName: envelope.type, message };
+}
+
+/**
+ * Check if a type name corresponds to an Event.
+ */
+export function isEventTypeName(typeName: string): boolean {
+  return _eventTypeNames.has(typeName);
+}
+
+/**
+ * Check if a type name corresponds to a Request.
+ */
+export function isRequestTypeName(typeName: string): boolean {
+  return _requestTypeNames.has(typeName);
+}
+
+/**
+ * Get the Zod schema for a wire message type name.
+ */
+export function getWireMessageSchema(
+  typeName: string
+): z.ZodType<unknown> | undefined {
+  return _wireMessageSchemas[typeName];
+}

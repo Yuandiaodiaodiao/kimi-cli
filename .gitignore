@@ -1,47 +1,34 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+# dependencies (bun install)
+node_modules
 
-# Virtual environments
-.venv
+# output
+out
+dist
+*.tgz
 
-# Project files
-.vscode
+# code coverage
+coverage
+*.lcov
+
+# logs
+logs
+_.log
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# dotenv environment variable files
 .env
+.env.development.local
+.env.test.local
+.env.production.local
 .env.local
-/tests_local
-uv.toml
-.idea/*
 
-# Build dependencies
-src/kimi_cli/deps/bin
-src/kimi_cli/deps/tmp
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
 
-# Web build artifacts
-src/kimi_cli/web/static/assets/
+# IntelliJ based IDEs
+.idea
 
-# Vis build artifacts
-src/kimi_cli/vis/static/
-
-# Generated reports
-tests_ai/report.json
-
-# nix build result
-result
-result-*
-
-# macOS files
+# Finder (MacOS) folder config
 .DS_Store
-
-# Rust files
-target/
-
-node_modules/
-static/
-.memo/
-.entire
-.claude
