@@ -216,22 +216,14 @@ export class Grep extends CallableTool<typeof ParamsSchema> {
       // Post-processing: strip path prefix
       let searchBase = searchPath;
       try {
-        const stat = await Bun.file(searchBase).exists();
-        // If it's a file, use its parent directory
-        if (stat) {
-          const f = Bun.file(searchBase);
-          // Check if it's a file by trying to get size
-          try {
-            // Use a simple heuristic: if path has extension, likely a file
-            if (searchBase.includes(".") && !searchBase.endsWith("/")) {
-              searchBase = searchBase.replace(/\/[^/]+$/, "");
-            }
-          } catch {
-            // ignore
-          }
+        const { stat } = await import("node:fs/promises");
+        const info = await stat(searchBase);
+        if (info.isFile()) {
+          // If searching a single file, strip its parent directory prefix
+          searchBase = searchBase.replace(/\/[^/]+$/, "");
         }
       } catch {
-        // ignore
+        // path doesn't exist or inaccessible, use as-is
       }
       output = stripPathPrefix(output, searchBase);
 

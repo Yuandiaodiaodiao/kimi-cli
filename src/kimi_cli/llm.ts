@@ -450,11 +450,22 @@ class OpenAICompatibleProvider implements LLMProvider {
       model: this.modelName,
       messages: openaiMessages,
       stream: true,
+      stream_options: { include_usage: true },
     };
 
-    if (options?.maxTokens) body.max_tokens = options.maxTokens;
+    // Default max_tokens if not provided (Python Kimi provider defaults to 32000)
+    body.max_tokens = options?.maxTokens ?? 32000;
     if (options?.temperature != null) body.temperature = options.temperature;
     if (options?.topP != null) body.top_p = options.topP;
+
+    // Thinking mode configuration (Kimi-specific)
+    const thinking = options?.thinking ?? this.thinkingMode;
+    if (thinking && thinking !== "off") {
+      body.reasoning_effort = thinking; // "high" | "low"
+      body.thinking = { type: "enabled" };
+    } else if (thinking === "off") {
+      body.thinking = { type: "disabled" };
+    }
 
     // Tools
     if (options?.tools && options.tools.length > 0) {
@@ -502,6 +513,7 @@ class OpenAICompatibleProvider implements LLMProvider {
     let buffer = "";
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
+    let cacheReadTokens = 0;
     const pendingToolCalls = new Map<
       number,
       { id: string; name: string; arguments: string }
@@ -529,12 +541,20 @@ class OpenAICompatibleProvider implements LLMProvider {
             continue;
           }
 
-          // Extract usage if present
+          // Extract usage if present (handle both standard and Kimi-specific formats)
           if (data.usage) {
-            totalInputTokens =
-              data.usage.prompt_tokens ?? data.usage.input_tokens ?? 0;
-            totalOutputTokens =
-              data.usage.completion_tokens ?? data.usage.output_tokens ?? 0;
+            const u = data.usage;
+            totalInputTokens = u.prompt_tokens ?? u.input_tokens ?? 0;
+            totalOutputTokens = u.completion_tokens ?? u.output_tokens ?? 0;
+            // Kimi-specific: cached_tokens at root level
+            cacheReadTokens = u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+          }
+          // Kimi may also embed usage in choice
+          if (data.choices?.[0]?.usage) {
+            const cu = data.choices[0].usage;
+            totalInputTokens = cu.prompt_tokens ?? totalInputTokens;
+            totalOutputTokens = cu.completion_tokens ?? totalOutputTokens;
+            cacheReadTokens = cu.cached_tokens ?? cacheReadTokens;
           }
 
           const choices = data.choices;
@@ -600,6 +620,7 @@ class OpenAICompatibleProvider implements LLMProvider {
         usage: {
           inputTokens: totalInputTokens,
           outputTokens: totalOutputTokens,
+          ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
         },
       };
     }
@@ -658,11 +679,26 @@ class OpenAICompatibleProvider implements LLMProvider {
         }
 
         if (msg.role === "assistant" && toolUseParts.length > 0) {
-          result.push({
+          const assistantMsg: OpenAIMessage = {
             role: "assistant",
             content: textParts.join("\n") || null,
             tool_calls: toolUseParts,
-          });
+          };
+          // Preserve reasoning_content for multi-turn thinking
+          if ((msg as any).reasoning_content) {
+            (assistantMsg as any).reasoning_content = (msg as any).reasoning_content;
+          }
+          result.push(assistantMsg);
+        } else if (msg.role === "assistant") {
+          const assistantMsg: OpenAIMessage = {
+            role: "assistant",
+            content: textParts.join("\n") || null,
+          };
+          // Preserve reasoning_content for multi-turn thinking
+          if ((msg as any).reasoning_content) {
+            (assistantMsg as any).reasoning_content = (msg as any).reasoning_content;
+          }
+          result.push(assistantMsg);
         } else if (toolResultParts.length > 0) {
           // Tool results become individual tool messages
           for (const tr of toolResultParts) {

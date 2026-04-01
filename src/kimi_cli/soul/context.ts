@@ -261,12 +261,7 @@ export class Context {
 
   private async _appendToFile(record: ContextRecord): Promise<void> {
     const line = JSON.stringify(record) + "\n";
-    const file = Bun.file(this._filePath);
-    if (await file.exists()) {
-      const existing = await file.text();
-      await Bun.write(this._filePath, existing + line);
-    } else {
-      await Bun.write(this._filePath, line);
-    }
+    const { appendFile } = await import("node:fs/promises");
+    await appendFile(this._filePath, line, "utf-8");
   }
 }

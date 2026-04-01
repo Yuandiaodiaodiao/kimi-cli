@@ -8,11 +8,11 @@
  * │  Directory / Session / Model          │
  * └──────────────────────────────────────┘
  *
- * [MessageList - scrollable]
+ * [Messages...]                    ← middle area (flex-grow)
+ * ✨ input_                        ← input inside middle area
  *
- * ─────────────────────────────────────────
- * agent (model ●)  ~/dir  branch  context: 0.0%
- * ✨ _
+ * ─────────────────────────────────────────  ← bottom
+ * agent (model ●)  ~/dir  context: 0.0%
  */
 
 import React, { useCallback, useEffect, useState } from "react";
@@ -132,7 +132,7 @@ export function Shell({
 
   return (
     <Box flexDirection="column" height={termHeight}>
-      {/* Welcome box - always shown at top */}
+      {/* Top: Welcome box */}
       <WelcomeBox
         workDir={workDir}
         sessionId={sessionId}
@@ -140,28 +140,38 @@ export function Shell({
         tip="Spot a bug or have feedback? Type /feedback right in this session — every report makes Kimi better."
       />
 
-      {/* Message area (flex-grow) */}
+      {/* Middle: Chat area (flex-grow) */}
       <Box flexDirection="column" flexGrow={1} overflow="hidden">
-        <MessageList messages={wire.messages} isStreaming={wire.isStreaming} />
+        {/* Chat history — grows upward, messages from top */}
+        <Box flexDirection="column" flexGrow={1} overflow="hidden">
+          <MessageList messages={wire.messages} isStreaming={wire.isStreaming} />
 
-        {/* Streaming indicator */}
-        {wire.isStreaming && !wire.isCompacting && (
-          <StreamingSpinner stepCount={wire.stepCount} />
+          {/* Streaming indicator */}
+          {wire.isStreaming && !wire.isCompacting && (
+            <StreamingSpinner stepCount={wire.stepCount} />
+          )}
+
+          {/* Compaction indicator */}
+          <CompactionSpinner active={wire.isCompacting} />
+        </Box>
+
+        {/* Approval prompt (modal) */}
+        {wire.pendingApproval && (
+          <ApprovalPrompt
+            request={wire.pendingApproval}
+            onRespond={handleApprovalResponse}
+          />
         )}
 
-        {/* Compaction indicator */}
-        <CompactionSpinner active={wire.isCompacting} />
+        {/* Input prompt ✨ — fixed at bottom of chat area */}
+        <Prompt
+          onSubmit={handleSubmit}
+          disabled={wire.isStreaming || !!wire.pendingApproval}
+          isStreaming={wire.isStreaming}
+        />
       </Box>
 
-      {/* Approval prompt (modal) */}
-      {wire.pendingApproval && (
-        <ApprovalPrompt
-          request={wire.pendingApproval}
-          onRespond={handleApprovalResponse}
-        />
-      )}
-
-      {/* Status bar: separator + status line */}
+      {/* Bottom: Status bar (separator line + status text) */}
       <StatusBar
         modelName={modelName}
         workDir={workDir}
@@ -171,13 +181,6 @@ export function Shell({
         isCompacting={wire.isCompacting}
         planMode={wire.status?.plan_mode ?? false}
         thinking={thinking}
-      />
-
-      {/* Input prompt with ✨ */}
-      <Prompt
-        onSubmit={handleSubmit}
-        disabled={wire.isStreaming || !!wire.pendingApproval}
-        isStreaming={wire.isStreaming}
       />
     </Box>
   );

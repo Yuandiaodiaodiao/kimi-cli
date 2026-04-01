@@ -316,9 +316,6 @@ export class KimiSoul {
 
     // Build assistant message content
     const contentParts: ContentPart[] = [];
-    if (thinkText) {
-      // Thinking content is not added to context (internal)
-    }
     if (assistantText) {
       contentParts.push({ type: "text", text: assistantText });
     }
@@ -332,13 +329,17 @@ export class KimiSoul {
     }
 
     // Append assistant message to context
+    // Note: reasoning_content (thinkText) is stored separately in the message
+    // and will be serialized as reasoning_content field for the API
     if (contentParts.length > 0) {
-      const assistantMsg: Message = {
+      const assistantMsg: Message & { reasoning_content?: string } = {
         role: "assistant",
-        content: contentParts.length === 1 && contentParts[0]!.type === "text"
-          ? assistantText
-          : contentParts,
+        content: contentParts,
       };
+      // Preserve thinking content so it can be sent back to the model
+      if (thinkText) {
+        assistantMsg.reasoning_content = thinkText;
+      }
       await this.context.appendMessage(assistantMsg);
     }
 

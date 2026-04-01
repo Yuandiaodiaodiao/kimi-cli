@@ -24,19 +24,19 @@ class Logger {
   }
 
   debug(message: string, ...args: unknown[]): void {
-    if (this.shouldLog("debug")) console.debug(`[DEBUG] ${message}`, ...args);
+    if (this.shouldLog("debug")) process.stderr.write(`[DEBUG] ${message}${args.length ? " " + args.map(String).join(" ") : ""}\n`);
   }
 
   info(message: string, ...args: unknown[]): void {
-    if (this.shouldLog("info")) console.info(`[INFO] ${message}`, ...args);
+    if (this.shouldLog("info")) process.stderr.write(`[INFO] ${message}${args.length ? " " + args.map(String).join(" ") : ""}\n`);
   }
 
   warn(message: string, ...args: unknown[]): void {
-    if (this.shouldLog("warn")) console.warn(`[WARN] ${message}`, ...args);
+    if (this.shouldLog("warn")) process.stderr.write(`[WARN] ${message}${args.length ? " " + args.map(String).join(" ") : ""}\n`);
   }
 
   error(message: string, ...args: unknown[]): void {
-    if (this.shouldLog("error")) console.error(`[ERROR] ${message}`, ...args);
+    if (this.shouldLog("error")) process.stderr.write(`[ERROR] ${message}${args.length ? " " + args.map(String).join(" ") : ""}\n`);
   }
 }
 

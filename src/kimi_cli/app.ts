@@ -179,16 +179,7 @@ export class KimiCLI {
     const soul = new KimiSoul({
       agent,
       context,
-      callbacks: {
-        ...opts.callbacks,
-        onTextDelta: opts.callbacks?.onTextDelta ?? ((text) => process.stdout.write(text)),
-        onThinkDelta: opts.callbacks?.onThinkDelta ?? ((text) => {
-          process.stdout.write(`\x1b[2m${text}\x1b[0m`);
-        }),
-        onError: opts.callbacks?.onError ?? ((err) => {
-          console.error(`\n[Error] ${err.message}`);
-        }),
-      },
+      callbacks: opts.callbacks ?? {},
     });
 
     // Wire slash commands

@@ -4,7 +4,7 @@
  */
 
 import { z } from "zod/v4";
-import * as TOML from "smol-toml";
+import TOML from "@iarna/toml";
 import { ModelCapability } from "./types.ts";
 
 // ── Sub-schemas ─────────────────────────────────────────
@@ -198,7 +198,9 @@ export async function loadConfig(
 
   try {
     const text = await file.text();
-    const data = TOML.parse(text);
+    const rawData = TOML.parse(text);
+    // @iarna/toml adds Symbol properties that break Zod validation — strip them via JSON roundtrip
+    const data = JSON.parse(JSON.stringify(rawData));
     const config = Config.parse(data);
 
     // Environment variable overrides

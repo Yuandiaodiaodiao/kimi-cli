@@ -1,38 +1,24 @@
 /**
  * Tests for utils/logging.ts — logger.
  */
-import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { logger } from "../../src/kimi_cli/utils/logging.ts";
 
 describe("Logger", () => {
-  // Save original console methods
-  const originalDebug = console.debug;
-  const originalInfo = console.info;
-  const originalWarn = console.warn;
-  const originalError = console.error;
-
-  let debugCalls: string[];
-  let infoCalls: string[];
-  let warnCalls: string[];
-  let errorCalls: string[];
+  // Capture stderr writes
+  const originalWrite = process.stderr.write;
+  let stderrOutput: string[];
 
   beforeEach(() => {
-    debugCalls = [];
-    infoCalls = [];
-    warnCalls = [];
-    errorCalls = [];
-
-    console.debug = (...args: any[]) => debugCalls.push(args.join(" "));
-    console.info = (...args: any[]) => infoCalls.push(args.join(" "));
-    console.warn = (...args: any[]) => warnCalls.push(args.join(" "));
-    console.error = (...args: any[]) => errorCalls.push(args.join(" "));
+    stderrOutput = [];
+    process.stderr.write = ((data: string | Uint8Array) => {
+      stderrOutput.push(typeof data === "string" ? data : new TextDecoder().decode(data));
+      return true;
+    }) as any;
   });
 
   afterEach(() => {
-    console.debug = originalDebug;
-    console.info = originalInfo;
-    console.warn = originalWarn;
-    console.error = originalError;
+    process.stderr.write = originalWrite;
     // Reset to info
     logger.setLevel("info");
   });
@@ -44,10 +30,11 @@ describe("Logger", () => {
     logger.warn("wrn");
     logger.error("err");
 
-    expect(debugCalls.length).toBe(0);
-    expect(infoCalls.length).toBe(1);
-    expect(warnCalls.length).toBe(1);
-    expect(errorCalls.length).toBe(1);
+    const output = stderrOutput.join("");
+    expect(output).not.toContain("[DEBUG]");
+    expect(output).toContain("[INFO]");
+    expect(output).toContain("[WARN]");
+    expect(output).toContain("[ERROR]");
   });
 
   test("debug level logs everything", () => {
@@ -57,10 +44,11 @@ describe("Logger", () => {
     logger.warn("wrn");
     logger.error("err");
 
-    expect(debugCalls.length).toBe(1);
-    expect(infoCalls.length).toBe(1);
-    expect(warnCalls.length).toBe(1);
-    expect(errorCalls.length).toBe(1);
+    const output = stderrOutput.join("");
+    expect(output).toContain("[DEBUG]");
+    expect(output).toContain("[INFO]");
+    expect(output).toContain("[WARN]");
+    expect(output).toContain("[ERROR]");
   });
 
   test("error level only logs errors", () => {
@@ -70,10 +58,11 @@ describe("Logger", () => {
     logger.warn("wrn");
     logger.error("err");
 
-    expect(debugCalls.length).toBe(0);
-    expect(infoCalls.length).toBe(0);
-    expect(warnCalls.length).toBe(0);
-    expect(errorCalls.length).toBe(1);
+    const output = stderrOutput.join("");
+    expect(output).not.toContain("[DEBUG]");
+    expect(output).not.toContain("[INFO]");
+    expect(output).not.toContain("[WARN]");
+    expect(output).toContain("[ERROR]");
   });
 
   test("warn level logs warn and error", () => {
@@ -83,18 +72,20 @@ describe("Logger", () => {
     logger.warn("wrn");
     logger.error("err");
 
-    expect(debugCalls.length).toBe(0);
-    expect(infoCalls.length).toBe(0);
-    expect(warnCalls.length).toBe(1);
-    expect(errorCalls.length).toBe(1);
+    const output = stderrOutput.join("");
+    expect(output).not.toContain("[DEBUG]");
+    expect(output).not.toContain("[INFO]");
+    expect(output).toContain("[WARN]");
+    expect(output).toContain("[ERROR]");
   });
 
   test("log messages have level prefix", () => {
     logger.setLevel("debug");
     logger.debug("test message");
-    expect(debugCalls[0]).toContain("[DEBUG]");
+    expect(stderrOutput.join("")).toContain("[DEBUG] test message");
 
+    stderrOutput = [];
     logger.info("test message");
-    expect(infoCalls[0]).toContain("[INFO]");
+    expect(stderrOutput.join("")).toContain("[INFO] test message");
   });
 });

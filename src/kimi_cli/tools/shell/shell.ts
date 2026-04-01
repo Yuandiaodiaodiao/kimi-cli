@@ -118,8 +118,9 @@ export class Shell extends CallableTool<typeof ParamsSchema> {
       let timedOut = false;
 
       try {
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
         const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(
+          timeoutId = setTimeout(
             () => reject(new Error("timeout")),
             params.timeout * 1000,
           );
@@ -139,6 +140,7 @@ export class Shell extends CallableTool<typeof ParamsSchema> {
         })();
 
         const result = await Promise.race([resultPromise, timeoutPromise]);
+        if (timeoutId !== null) clearTimeout(timeoutId);
 
         // Write stdout and stderr
         if (result.stdout) builder.write(result.stdout);
