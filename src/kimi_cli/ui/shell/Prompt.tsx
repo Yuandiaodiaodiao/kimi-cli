@@ -5,7 +5,7 @@
  */
 
 import React, { useState, useCallback } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
 import { useInputHistory } from "../hooks/useInput.ts";
 import {
@@ -123,8 +123,14 @@ export function Prompt({
     { isActive: !disabled },
   );
 
+  const { stdout } = useStdout();
+  const columns = stdout?.columns ?? 80;
+
   return (
     <Box flexDirection="column">
+      {/* Separator line above input */}
+      <Text color="#555555">{"─".repeat(columns)}</Text>
+
       {/* Input line — always rendered, always on top */}
       <Box>
         <Text>{isStreaming ? "🔄 " : "✨ "}</Text>

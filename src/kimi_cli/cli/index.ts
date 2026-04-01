@@ -28,6 +28,7 @@ program
   .option("--max-steps-per-turn <n>", "Max steps per turn", parseInt)
   .option("--config <path>", "Config file path")
   .option("--session <id>", "Resume session by ID")
+  .option("-C, --continue", "Continue the most recent session")
   .option("--verbose", "Verbose output")
   .option("--debug", "Debug mode")
   .action(
@@ -42,6 +43,7 @@ program
         maxStepsPerTurn?: number;
         config?: string;
         session?: string;
+        continue?: boolean;
         verbose?: boolean;
         debug?: boolean;
       },
@@ -76,6 +78,7 @@ program
             thinking: options.thinking,
             yolo: options.yolo,
             sessionId: options.session,
+            continueSession: options.continue,
             maxStepsPerTurn: options.maxStepsPerTurn,
             callbacks,
           });

@@ -47,6 +47,7 @@ export class KimiCLI {
     thinking?: boolean;
     yolo?: boolean;
     sessionId?: string;
+    continueSession?: boolean;
     maxStepsPerTurn?: number;
     callbacks?: SoulCallbacks;
   }): Promise<KimiCLI> {
@@ -145,6 +146,15 @@ export class KimiCLI {
     if (opts.sessionId) {
       const found = await Session.find(workDir, opts.sessionId);
       session = found ?? (await Session.create(workDir));
+    } else if (opts.continueSession) {
+      const continued = await Session.continue_(workDir);
+      if (continued) {
+        session = continued;
+        logger.info(`Continuing session ${session.id}`);
+      } else {
+        session = await Session.create(workDir);
+        logger.info("No previous session found, starting new session");
+      }
     } else {
       session = await Session.create(workDir);
     }
