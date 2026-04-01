@@ -15,6 +15,17 @@ import { compactContext, shouldCompact } from "./compaction.ts";
 import { toolResultMessage } from "./message.ts";
 import { logger } from "../utils/logging.ts";
 
+// ── Errors ─────────────────────────────────────────
+
+export class MaxStepsReached extends Error {
+  readonly maxSteps: number;
+  constructor(maxSteps: number) {
+    super(`Reached max steps per turn: ${maxSteps}`);
+    this.name = "MaxStepsReached";
+    this.maxSteps = maxSteps;
+  }
+}
+
 // ── Wire event callbacks ────────────────────────────
 
 export interface SoulCallbacks {
@@ -32,6 +43,85 @@ export interface SoulCallbacks {
   onError?: (error: Error) => void;
 }
 
+// ── Retry helpers ───────────────────────────────────
+
+function isRetryableError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  // HTTP status codes that are retryable
+  if (/\b(429|500|502|503|504)\b/.test(msg)) return true;
+  // Network errors
+  if (msg.includes("timeout") || msg.includes("econnreset") ||
+      msg.includes("econnrefused") || msg.includes("connection") ||
+      msg.includes("network") || msg.includes("fetch failed") ||
+      msg.includes("socket hang up")) return true;
+  // Empty response
+  if (msg.includes("empty response") || msg.includes("no body")) return true;
+  return false;
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Retry with exponential backoff and jitter. */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries: number,
+  label: string,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt >= maxRetries || !isRetryableError(err)) {
+        throw err;
+      }
+      const baseDelay = Math.min(300 * Math.pow(2, attempt), 5000);
+      const jitter = Math.random() * 500;
+      const delay = baseDelay + jitter;
+      logger.warn(`${label}: retryable error (attempt ${attempt + 1}/${maxRetries}), retrying in ${Math.round(delay)}ms: ${err instanceof Error ? err.message : err}`);
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}
+
+// ── History normalization ───────────────────────────
+
+/**
+ * Merge adjacent messages of the same role.
+ * Many LLM APIs reject consecutive user or assistant messages.
+ */
+function normalizeHistory(messages: Message[]): Message[] {
+  if (messages.length === 0) return messages;
+
+  const result: Message[] = [];
+  for (const msg of messages) {
+    const prev = result[result.length - 1];
+    if (prev && prev.role === msg.role && prev.role === "user") {
+      // Merge into previous user message
+      const prevText = typeof prev.content === "string" ? prev.content : prev.content.map(p => p.type === "text" ? p.text : "").join("\n");
+      const curText = typeof msg.content === "string" ? msg.content : msg.content.map(p => p.type === "text" ? p.text : "").join("\n");
+
+      // Check if current has tool_result parts — those must stay separate
+      const curParts = typeof msg.content === "string" ? [] : msg.content;
+      const hasToolResult = curParts.some(p => p.type === "tool_result");
+      if (hasToolResult) {
+        result.push(msg);
+        continue;
+      }
+
+      prev.content = prevText + "\n\n" + curText;
+    } else {
+      result.push({ ...msg });
+    }
+  }
+  return result;
+}
+
 // ── KimiSoul ────────────────────────────────────────
 
 export class KimiSoul {
@@ -46,6 +136,10 @@ export class KimiSoul {
     inputTokens: 0,
     outputTokens: 0,
   };
+  // Steer queue: messages injected during a running turn
+  private _pendingSteers: Message[] = [];
+  // Track whether any tool was rejected without feedback this turn
+  private _toolRejectedNoFeedback = false;
 
   constructor(opts: {
     agent: Agent;
@@ -143,6 +237,7 @@ export class KimiSoul {
 
     this._isRunning = true;
     this.abortController = new AbortController();
+    this._toolRejectedNoFeedback = false;
 
     try {
       this.callbacks.onTurnBegin?.(userInput);
@@ -151,6 +246,11 @@ export class KimiSoul {
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
         logger.info("Turn aborted");
+        this.callbacks.onStepInterrupted?.();
+      } else if (err instanceof MaxStepsReached) {
+        logger.warn(err.message);
+        this.callbacks.onError?.(err);
+        this.callbacks.onTurnEnd?.();
       } else {
         logger.error(`Turn error: ${err}`);
         this.callbacks.onError?.(
@@ -160,6 +260,7 @@ export class KimiSoul {
     } finally {
       this._isRunning = false;
       this.abortController = null;
+      this._pendingSteers = [];
     }
   }
 
@@ -175,7 +276,7 @@ export class KimiSoul {
       role: "user",
       content: typeof content === "string" ? content : content,
     };
-    await this.context.appendMessage(msg);
+    this._pendingSteers.push(msg);
   }
 
   // ── Turn execution ──────────────────────────────
@@ -198,12 +299,20 @@ export class KimiSoul {
     const maxSteps = this.agent.runtime.config.loop_control.max_steps_per_turn;
     this._stepCount = 0;
 
-    while (this._stepCount < maxSteps) {
+    while (true) {
+      // Check max steps — raise exception like Python
+      if (this._stepCount >= maxSteps) {
+        throw new MaxStepsReached(maxSteps);
+      }
+
       // Check abort
       if (this.abortController?.signal.aborted) {
         this.callbacks.onStepInterrupted?.();
         break;
       }
+
+      // Consume pending steers
+      const hadSteers = await this._consumePendingSteers();
 
       // Check if compaction needed
       await this._maybeCompact();
@@ -212,31 +321,74 @@ export class KimiSoul {
       this._stepCount++;
       this.callbacks.onStepBegin?.(this._stepCount);
 
-      const toolCalls = await this._step();
+      const maxRetries = this.agent.runtime.config.loop_control.max_retries_per_step;
+      const toolCalls = await withRetry(
+        () => this._step(),
+        maxRetries,
+        `step ${this._stepCount}`,
+      );
 
-      // No tool calls = turn is done
-      if (toolCalls.length === 0) break;
+      // No tool calls = turn is done (unless steers are pending)
+      if (toolCalls.length === 0) {
+        // Check for pending steers — if any, force another iteration
+        if (this._pendingSteers.length > 0) {
+          continue;
+        }
+        break;
+      }
 
-      // Execute tools and collect results
-      for (const tc of toolCalls) {
-        if (this.abortController?.signal.aborted) break;
+      // Execute tools and collect results — shielded from abort
+      await this._executeToolsShielded(toolCalls);
 
-        const result = await this.agent.toolset.handle(tc);
-
-        // Build tool result message and append to context
-        const resultMsg = toolResultMessage({
-          toolCallId: tc.id,
-          output: result.output,
-          isError: result.isError,
-          message: result.message,
-        });
-        await this.context.appendMessage(resultMsg);
+      // If a tool was rejected without feedback, stop the turn
+      if (this._toolRejectedNoFeedback && this.agent.runtime.role !== "subagent") {
+        logger.info("Turn stopped: tool was rejected without feedback");
+        break;
       }
     }
+  }
 
-    if (this._stepCount >= maxSteps) {
-      logger.warn(`Reached max steps per turn: ${maxSteps}`);
+  /**
+   * Execute tools and append results to context.
+   * This is "shielded" from abort to keep context consistent —
+   * once we start appending, we finish even if abort fires.
+   */
+  private async _executeToolsShielded(toolCalls: ToolCall[]): Promise<void> {
+    for (const tc of toolCalls) {
+      // Check abort before each tool, but don't interrupt mid-append
+      if (this.abortController?.signal.aborted) break;
+
+      const result = await this.agent.toolset.handle(tc);
+
+      // Detect tool rejection without feedback
+      if (result.isError && result.message?.includes("rejected by the user")) {
+        // If the rejection message is just the standard template, no user feedback
+        if (!result.extras?.userFeedback) {
+          this._toolRejectedNoFeedback = true;
+        }
+      }
+
+      // Build tool result message and append to context
+      const resultMsg = toolResultMessage({
+        toolCallId: tc.id,
+        output: result.output,
+        isError: result.isError,
+        message: result.message,
+      });
+      // Append atomically — even if abort was signaled during tool execution,
+      // we still append the result to keep context consistent
+      await this.context.appendMessage(resultMsg);
     }
+  }
+
+  /** Drain the steer queue into context. Returns true if any steers were consumed. */
+  private async _consumePendingSteers(): Promise<boolean> {
+    if (this._pendingSteers.length === 0) return false;
+    const steers = this._pendingSteers.splice(0);
+    for (const msg of steers) {
+      await this.context.appendMessage(msg);
+    }
+    return true;
   }
 
   // ── Single step ─────────────────────────────────
@@ -247,18 +399,21 @@ export class KimiSoul {
       throw new Error("No LLM configured");
     }
 
-    // Build messages for LLM
-    const messages = [...this.context.history] as Message[];
+    // Build messages for LLM — normalize to merge adjacent user messages
+    const rawMessages = [...this.context.history] as Message[];
 
-    // Collect dynamic injections (plan mode reminder, etc.)
+    // Collect dynamic injections (plan mode reminder, yolo mode, etc.)
     const injections = this._collectDynamicInjections();
     if (injections.length > 0) {
       // Add as the last user message (system reminder)
-      messages.push({
+      rawMessages.push({
         role: "user",
         content: injections.join("\n\n"),
       });
     }
+
+    // Normalize: merge adjacent user messages to avoid API errors
+    const messages = normalizeHistory(rawMessages);
 
     // Call LLM
     const chatOptions: ChatOptions = {
@@ -364,6 +519,16 @@ export class KimiSoul {
         "<system-reminder>\n" +
           "Plan mode is active. You MUST NOT make any edits or run any non-readonly tools. " +
           "Focus on exploring the codebase and designing an implementation approach.\n" +
+          "</system-reminder>",
+      );
+    }
+
+    // Yolo mode injection — tell the LLM that all tools are auto-approved
+    if (this.isYolo && this._stepCount <= 1) {
+      injections.push(
+        "<system-reminder>\n" +
+          "All tool calls are auto-approved (YOLO mode is ON). " +
+          "You do not need to ask for permission or confirmation before running tools.\n" +
           "</system-reminder>",
       );
     }

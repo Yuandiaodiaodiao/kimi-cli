@@ -2,21 +2,23 @@
  * Shell.tsx — Main REPL component.
  * Corresponds to Python's ui/shell/__init__.py.
  *
- * Layout (matching Python):
+ * Layout:
  * ┌─ WelcomeBox ─────────────────────────┐
  * │  Logo  Welcome to Kimi Code CLI!     │
- * │  Directory / Session / Model          │
  * └──────────────────────────────────────┘
  *
- * [Messages...]                    ← middle area (flex-grow)
- * ✨ input_                        ← input inside middle area
+ * [Messages...]                    ← middle (flex-grow)
+ * ──────────────────────────        ← slash menu (when typing /)
+ * ▸ /clear   Clear conversation
+ *   /help    Show help
+ * ✨ /cl_                           ← input
  *
- * ─────────────────────────────────────────  ← bottom
- * agent (model ●)  ~/dir  context: 0.0%
+ * ─────────────────────────────────  ← bottom (hidden when slash menu open)
+ * agent (model ●)  ~/dir  context%
  */
 
 import React, { useCallback, useEffect, useState } from "react";
-import { Box, Text, useApp, useStdout } from "ink";
+import { Box, useApp, useStdout } from "ink";
 import { MessageList } from "./Visualize.tsx";
 import { Prompt } from "./Prompt.tsx";
 import { WelcomeBox } from "../components/WelcomeBox.tsx";
@@ -34,6 +36,17 @@ import { setActiveTheme } from "../theme.ts";
 import type { WireUIEvent } from "./events.ts";
 import type { ApprovalResponseKind } from "../../wire/types.ts";
 import type { SlashCommand } from "../../types.ts";
+
+/** Deduplicate commands by name, shell commands take priority */
+function deduplicateCommands(commands: SlashCommand[]): SlashCommand[] {
+  const seen = new Map<string, SlashCommand>();
+  for (const cmd of commands) {
+    if (!seen.has(cmd.name)) {
+      seen.set(cmd.name, cmd);
+    }
+  }
+  return [...seen.values()];
+}
 
 export interface ShellProps {
   modelName?: string;
@@ -63,6 +76,7 @@ export function Shell({
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [termHeight, setTermHeight] = useState(stdout?.rows || 24);
+  const [slashMenuVisible, setSlashMenuVisible] = useState(false);
 
   // Wire state
   const wire = useWire({ onReady: onWireReady });
@@ -74,13 +88,18 @@ export function Shell({
     setTheme: (theme) => setActiveTheme(theme),
   });
 
-  const allCommands = [...shellCommands, ...extraSlashCommands];
+  const allCommands = deduplicateCommands([
+    ...shellCommands,
+    ...extraSlashCommands,
+  ]);
 
   // Handle terminal resize
   useEffect(() => {
     const onResize = () => setTermHeight(stdout?.rows || 24);
     stdout?.on("resize", onResize);
-    return () => { stdout?.off("resize", onResize); };
+    return () => {
+      stdout?.off("resize", onResize);
+    };
   }, [stdout]);
 
   // Keyboard handling
@@ -142,9 +161,12 @@ export function Shell({
 
       {/* Middle: Chat area (flex-grow) */}
       <Box flexDirection="column" flexGrow={1} overflow="hidden">
-        {/* Chat history — grows upward, messages from top */}
+        {/* Chat history */}
         <Box flexDirection="column" flexGrow={1} overflow="hidden">
-          <MessageList messages={wire.messages} isStreaming={wire.isStreaming} />
+          <MessageList
+            messages={wire.messages}
+            isStreaming={wire.isStreaming}
+          />
 
           {/* Streaming indicator */}
           {wire.isStreaming && !wire.isCompacting && (
@@ -163,25 +185,29 @@ export function Shell({
           />
         )}
 
-        {/* Input prompt ✨ — fixed at bottom of chat area */}
+        {/* Input prompt ✨ — with slash menu rendered above it */}
         <Prompt
           onSubmit={handleSubmit}
           disabled={wire.isStreaming || !!wire.pendingApproval}
           isStreaming={wire.isStreaming}
+          commands={allCommands}
+          onSlashMenuChange={setSlashMenuVisible}
         />
       </Box>
 
-      {/* Bottom: Status bar (separator line + status text) */}
-      <StatusBar
-        modelName={modelName}
-        workDir={workDir}
-        status={wire.status}
-        isStreaming={wire.isStreaming}
-        stepCount={wire.stepCount}
-        isCompacting={wire.isCompacting}
-        planMode={wire.status?.plan_mode ?? false}
-        thinking={thinking}
-      />
+      {/* Bottom: Status bar — hidden when slash menu is open */}
+      {!slashMenuVisible && (
+        <StatusBar
+          modelName={modelName}
+          workDir={workDir}
+          status={wire.status}
+          isStreaming={wire.isStreaming}
+          stepCount={wire.stepCount}
+          isCompacting={wire.isCompacting}
+          planMode={wire.status?.plan_mode ?? false}
+          thinking={thinking}
+        />
+      )}
     </Box>
   );
 }
