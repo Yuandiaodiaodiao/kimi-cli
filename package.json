@@ -11,6 +11,12 @@
     "start": "bun run src/kimi_cli/index.ts",
     "dev": "bun --watch run src/kimi_cli/index.ts",
     "test": "bun test",
+    "build": "bun build src/kimi_cli/index.ts --compile --outfile dist/kimi",
+    "build:linux-x64": "bun build src/kimi_cli/index.ts --compile --outfile dist/kimi --target=bun-linux-x64",
+    "build:linux-arm64": "bun build src/kimi_cli/index.ts --compile --outfile dist/kimi --target=bun-linux-arm64",
+    "build:darwin-x64": "bun build src/kimi_cli/index.ts --compile --outfile dist/kimi --target=bun-darwin-x64",
+    "build:darwin-arm64": "bun build src/kimi_cli/index.ts --compile --outfile dist/kimi --target=bun-darwin-arm64",
+    "build:windows-x64": "bun build src/kimi_cli/index.ts --compile --outfile dist/kimi.exe --target=bun-windows-x64",
     "lint": "biome check src/",
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit"
@@ -19,7 +25,8 @@
     "@biomejs/biome": "^2.4.10",
     "@types/bun": "latest",
     "@types/micromatch": "^4.0.10",
-    "@types/react": "^19.2.14"
+    "@types/react": "^19.2.14",
+    "react-devtools-core": "^7.0.1"
   },
   "peerDependencies": {
     "typescript": "^5"
@@ -38,6 +45,7 @@
     "nanoid": "^5.1.7",
     "openai": "^6.33.0",
     "react": "^19.2.4",
+    "smol-toml": "^1.6.1",
     "zod": "^4.3.6",
     "zod-to-json-schema": "^3.25.2"
   }
