@@ -5,6 +5,7 @@
 
 import { loadConfig, type Config, type ConfigMeta } from "./config.ts";
 import { createLLM, augmentProviderWithEnvVars, type LLM } from "./llm.ts";
+import { OAuthManager, loadTokens, commonHeaders } from "./auth/oauth.ts";
 import { Session } from "./session.ts";
 import { HookEngine } from "./hooks/engine.ts";
 import { Context } from "./soul/context.ts";
@@ -42,6 +43,7 @@ export class KimiCLI {
 
   static async create(opts: {
     workDir?: string;
+    additionalDirs?: string[];
     configFile?: string;
     modelName?: string;
     thinking?: boolean;
@@ -74,12 +76,29 @@ export class KimiCLI {
       const providerConfig = config.providers[providerName];
 
       if (providerConfig) {
+        // Resolve API key: if OAuth is configured, load the access token
+        let apiKey = providerConfig.api_key;
+        if (providerConfig.oauth) {
+          const token = await loadTokens(providerConfig.oauth);
+          if (token) {
+            apiKey = token.access_token;
+          }
+        }
+
+        // Build platform identification headers (matches Python _kimi_default_headers)
+        const platformHeaders = await commonHeaders();
+        const mergedCustomHeaders: Record<string, string> = {
+          "User-Agent": `KimiCLI/2.0.0`,
+          ...platformHeaders,
+          ...(providerConfig.custom_headers ?? {}),
+        };
+
         // Convert snake_case config to camelCase LLM interface
         const llmProvider = {
           type: providerConfig.type as any,
           baseUrl: providerConfig.base_url,
-          apiKey: providerConfig.api_key,
-          customHeaders: providerConfig.custom_headers,
+          apiKey,
+          customHeaders: mergedCustomHeaders,
           env: providerConfig.env,
           oauth: providerConfig.oauth?.key ?? null,
         };
@@ -107,10 +126,15 @@ export class KimiCLI {
       const envModel = process.env.KIMI_MODEL_NAME;
 
       if (envBaseUrl && envApiKey && envModel) {
+        const envPlatformHeaders = await commonHeaders();
         const llmProvider = {
           type: "kimi" as const,
           baseUrl: envBaseUrl,
           apiKey: envApiKey,
+          customHeaders: {
+            "User-Agent": `KimiCLI/2.0.0`,
+            ...envPlatformHeaders,
+          } as Record<string, string>,
         };
         const llmModel = {
           model: envModel,
@@ -159,6 +183,13 @@ export class KimiCLI {
       session = await Session.create(workDir);
     }
 
+    // Store additional dirs in session state
+    if (opts.additionalDirs && opts.additionalDirs.length > 0) {
+      session.state.additional_dirs = opts.additionalDirs.map((d) =>
+        d.startsWith("/") ? d : `${workDir}/${d}`,
+      );
+    }
+
     // 4. Create hook engine
     const hookEngine = new HookEngine({
       hooks: config.hooks,
@@ -180,9 +211,13 @@ export class KimiCLI {
     const context = new Context(session.contextFile);
     await context.restore();
 
-    // 8. Write system prompt if new context
+    // 8. Write system prompt if new context; otherwise use restored prompt
     if (!context.systemPrompt) {
       await context.writeSystemPrompt(agent.systemPrompt);
+    } else {
+      // On session continuation, use the system prompt from the restored context
+      // to ensure consistency (the prompt may have changed between versions)
+      (agent as any).systemPrompt = context.systemPrompt;
     }
 
     // 9. Create KimiSoul
@@ -234,7 +269,15 @@ export class KimiCLI {
   async shutdown(): Promise<void> {
     this.soul.abort();
     await this.agent.toolset.cleanup();
-    await this.session.saveState();
+
+    // Clean up empty sessions (no real messages exchanged)
+    if (await this.session.isEmpty()) {
+      await this.session.delete();
+      logger.debug("Deleted empty session");
+    } else {
+      await this.session.saveState();
+    }
+
     logger.info("KimiCLI shutdown complete");
   }
 }

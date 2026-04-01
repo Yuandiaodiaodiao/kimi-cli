@@ -5,9 +5,18 @@
 
 import { z } from "zod/v4";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getShareDir } from "./config.ts";
 import { logger } from "./utils/logging.ts";
+import {
+  loadMetadata,
+  saveMetadata,
+  getWorkDirMeta,
+  newWorkDirMeta,
+  getSessionsDir,
+  type Metadata,
+  type WorkDirMeta,
+} from "./metadata.ts";
 
 // ── Session State ───────────────────────────────────────
 
@@ -56,35 +65,12 @@ export async function saveSessionState(state: SessionState, sessionDir: string):
   await Bun.write(stateFile, JSON.stringify(state, null, 2));
 }
 
-// ── WorkDir Metadata ────────────────────────────────────
-
-const METADATA_FILE = "metadata.json";
+// ── WorkDir Metadata (uses metadata.ts for Python-compatible MD5 hashing) ──
 
 function getSessionsBaseDir(workDir: string): string {
-  return join(getShareDir(), "sessions", workDir.replace(/\//g, "_").replace(/^_/, ""));
-}
-
-interface WorkDirMeta {
-  lastSessionId?: string;
-}
-
-async function loadWorkDirMeta(sessionsDir: string): Promise<WorkDirMeta> {
-  const metaFile = join(sessionsDir, METADATA_FILE);
-  try {
-    const file = Bun.file(metaFile);
-    if (await file.exists()) {
-      return await file.json() as WorkDirMeta;
-    }
-  } catch {
-    // ignore corrupt metadata
-  }
-  return {};
-}
-
-async function saveWorkDirMeta(sessionsDir: string, meta: WorkDirMeta): Promise<void> {
-  const metaFile = join(sessionsDir, METADATA_FILE);
-  await Bun.$`mkdir -p ${sessionsDir}`.quiet();
-  await Bun.write(metaFile, JSON.stringify(meta, null, 2));
+  // Use MD5 hash of the work directory path, compatible with Python metadata.py
+  const pathMd5 = createHash("md5").update(workDir, "utf-8").digest("hex");
+  return join(getShareDir(), "sessions", pathMd5);
 }
 
 // ── Session class ───────────────────────────────────────
@@ -120,11 +106,20 @@ export class Session {
   }
 
   get dir(): string {
-    return join(this.sessionsDir, this.id);
+    const path = join(this.sessionsDir, this.id);
+    // Note: directory creation is handled by save operations (saveState, create)
+    return path;
   }
 
   get subagentsDir(): string {
     return join(this.dir, "subagents");
+  }
+
+  /** Ensure the session directory exists (call before writing). */
+  async ensureDir(): Promise<string> {
+    const path = this.dir;
+    await Bun.$`mkdir -p ${path}`.quiet();
+    return path;
   }
 
   async isEmpty(): Promise<boolean> {
@@ -155,9 +150,18 @@ export class Session {
 
   async saveState(): Promise<void> {
     await Bun.$`mkdir -p ${this.dir}`.quiet();
+
+    // Reload externally-mutable fields from disk first to avoid
+    // overwriting concurrent changes made by the web API (matches Python behavior).
+    const fresh = await loadSessionState(this.dir);
+    this.state.custom_title = fresh.custom_title;
+    this.state.title_generated = fresh.title_generated;
+    this.state.title_generate_attempts = fresh.title_generate_attempts;
+    this.state.archived = fresh.archived;
+    this.state.archived_at = fresh.archived_at;
+    this.state.auto_archive_exempt = fresh.auto_archive_exempt;
+
     await saveSessionState(this.state, this.dir);
-    // Track as last session for this workDir
-    await saveWorkDirMeta(this.sessionsDir, { lastSessionId: this.id });
   }
 
   async delete(): Promise<void> {
@@ -214,6 +218,14 @@ export class Session {
 
   static async create(workDir: string, sessionId?: string): Promise<Session> {
     workDir = resolve(workDir);
+
+    // Ensure work dir is tracked in global metadata
+    const metadata = await loadMetadata();
+    let wdMeta = getWorkDirMeta(metadata, workDir);
+    if (!wdMeta) {
+      wdMeta = newWorkDirMeta(metadata, workDir);
+    }
+
     const sessionsDir = getSessionsBaseDir(workDir);
     const id = sessionId ?? randomUUID();
     const sessionDir = join(sessionsDir, id);
@@ -222,6 +234,8 @@ export class Session {
     const contextFile = join(sessionDir, "context.jsonl");
     // Truncate if exists
     await Bun.write(contextFile, "");
+
+    await saveMetadata(metadata);
 
     const session = new Session({
       id,
@@ -303,12 +317,12 @@ export class Session {
    */
   static async continue_(workDir: string): Promise<Session | null> {
     workDir = resolve(workDir);
-    const sessionsDir = getSessionsBaseDir(workDir);
 
-    // Try metadata first
-    const meta = await loadWorkDirMeta(sessionsDir);
-    if (meta.lastSessionId) {
-      const session = await Session.find(workDir, meta.lastSessionId);
+    // Try global metadata first (Python-compatible)
+    const metadata = await loadMetadata();
+    const wdMeta = getWorkDirMeta(metadata, workDir);
+    if (wdMeta?.lastSessionId) {
+      const session = await Session.find(workDir, wdMeta.lastSessionId);
       if (session) return session;
     }
 

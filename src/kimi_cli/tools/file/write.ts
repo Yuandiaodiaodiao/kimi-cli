@@ -3,10 +3,13 @@
  * Corresponds to Python tools/file/write.py
  */
 
+import { resolve, dirname } from "node:path";
 import { z } from "zod/v4";
 import { CallableTool } from "../base.ts";
 import type { ToolContext, ToolResult } from "../types.ts";
 import { ToolError } from "../types.ts";
+import { inspectPlanEditTarget } from "./plan_mode.ts";
+import type { DiffDisplayBlock } from "../display.ts";
 
 const DESCRIPTION = `Write content to a file.
 
@@ -35,17 +38,16 @@ function resolvePath(filePath: string, workingDir: string): string {
     }
     return filePath;
   }
-  return `${workingDir}/${filePath}`;
+  return resolve(workingDir, filePath);
 }
 
 /** Build a simple unified diff for display. */
 function buildSimpleDiff(oldContent: string, newContent: string, path: string): string {
   const oldLines = oldContent.split("\n");
   const newLines = newContent.split("\n");
-  const maxPreview = 50; // Max lines to show in diff
+  const maxPreview = 50;
   const diffLines: string[] = [`--- a/${path}`, `+++ b/${path}`];
 
-  // Simple line-by-line diff (show first differences)
   let shown = 0;
   const maxLen = Math.max(oldLines.length, newLines.length);
   for (let i = 0; i < maxLen && shown < maxPreview; i++) {
@@ -75,6 +77,16 @@ export class WriteFile extends CallableTool<typeof ParamsSchema> {
   readonly description = DESCRIPTION;
   readonly schema = ParamsSchema;
 
+  /** Optional plan mode bindings. */
+  private _planModeChecker?: () => boolean;
+  private _planFilePathGetter?: () => string | null;
+
+  /** Bind plan mode state checker and plan file path getter. */
+  bindPlanMode(checker: () => boolean, pathGetter: () => string | null): void {
+    this._planModeChecker = checker;
+    this._planFilePathGetter = pathGetter;
+  }
+
   async execute(params: Params, ctx: ToolContext): Promise<ToolResult> {
     if (!params.path) {
       return ToolError("File path cannot be empty.");
@@ -83,8 +95,24 @@ export class WriteFile extends CallableTool<typeof ParamsSchema> {
     try {
       const resolvedPath = resolvePath(params.path, ctx.workingDir);
 
+      // Check plan mode restrictions
+      const planTarget = inspectPlanEditTarget(resolvedPath, {
+        planModeChecker: this._planModeChecker ?? ctx.getPlanMode,
+        planFilePathGetter: this._planFilePathGetter,
+      });
+      if ("isError" in planTarget && planTarget.isError) {
+        return planTarget;
+      }
+      const isPlanFileWrite = !("isError" in planTarget) && planTarget.isPlanTarget;
+
+      // Ensure parent directory for plan file writes
+      if (isPlanFileWrite && !("isError" in planTarget) && planTarget.planPath) {
+        const { mkdirSync } = await import("node:fs");
+        mkdirSync(dirname(planTarget.planPath), { recursive: true });
+      }
+
       // Check if parent directory exists
-      const parentDir = resolvedPath.replace(/\/[^/]+$/, "");
+      const parentDir = dirname(resolvedPath);
       const { stat: fsStat, mkdir } = await import("node:fs/promises");
       try {
         const parentInfo = await fsStat(parentDir);
@@ -93,7 +121,6 @@ export class WriteFile extends CallableTool<typeof ParamsSchema> {
         }
       } catch (err: any) {
         if (err?.code === "ENOENT") {
-          // Auto-create parent directories
           await mkdir(parentDir, { recursive: true });
         } else {
           return ToolError(`Cannot access parent directory \`${parentDir}\`: ${err?.message}`);
@@ -115,20 +142,22 @@ export class WriteFile extends CallableTool<typeof ParamsSchema> {
         }
       }
 
-      // Request approval for writes
-      const approvalSummary = fileExisted
-        ? `${params.mode === "append" ? "Append to" : "Overwrite"} file \`${params.path}\`${diffPreview ? `\n${diffPreview}` : ""}`
-        : `Create file \`${params.path}\` (${params.content.length} chars)`;
+      // Plan file writes are auto-approved; other writes need approval
+      if (!isPlanFileWrite) {
+        const approvalSummary = fileExisted
+          ? `${params.mode === "append" ? "Append to" : "Overwrite"} file \`${params.path}\`${diffPreview ? `\n${diffPreview}` : ""}`
+          : `Create file \`${params.path}\` (${params.content.length} chars)`;
 
-      const decision = await ctx.approval(
-        "WriteFile",
-        fileExisted ? "edit" : "create",
-        approvalSummary,
-      );
-      if (decision === "reject") {
-        return ToolError(
-          "The tool call is rejected by the user. Stop what you are doing and wait for the user to tell you how to proceed.",
+        const decision = await ctx.approval(
+          "WriteFile",
+          fileExisted ? "edit" : "create",
+          approvalSummary,
         );
+        if (decision === "reject") {
+          return ToolError(
+            "The tool call is rejected by the user. Stop what you are doing and wait for the user to tell you how to proceed.",
+          );
+        }
       }
 
       if (params.mode === "append" && fileExisted) {

@@ -108,23 +108,23 @@ export interface MessageColors {
 }
 
 const MESSAGE_DARK: MessageColors = {
-  user: "#6fb7ff",
-  assistant: "#d4d4d4",
-  system: "#7c8594",
-  tool: "#9ca3af",
-  error: "#ff7b72",
-  dim: "#555555",
+  user: "#56d364",       // Rich "green"
+  assistant: "#e0e0e0",  // bright text for readability
+  system: "#d670d6",     // Rich "magenta"
+  tool: "#C8C5F4",       // Rich "blue" — lavender as seen in Python
+  error: "#ff7b72",      // Rich "dark_red"
+  dim: "#808080",        // Rich "grey50"
   thinking: "#7c8594",
-  highlight: "#56d364",
+  highlight: "#56d364",  // Rich "green"
 };
 
 const MESSAGE_LIGHT: MessageColors = {
-  user: "#1d4ed8",
-  assistant: "#374151",
-  system: "#6b7280",
-  tool: "#4b5563",
+  user: "#166534",       // dark green
+  assistant: "#1f2937",  // dark text
+  system: "#7c3aed",     // dark purple
+  tool: "#1d4ed8",       // dark blue
   error: "#dc2626",
-  dim: "#9ca3af",
+  dim: "#6b7280",
   thinking: "#6b7280",
   highlight: "#166534",
 };
@@ -159,6 +159,73 @@ function makeStyles(colors: MessageColors): ThemeStyles {
   };
 }
 
+// ── Prompt Style ──────────────────────────────────────────
+
+export interface PromptStyleColors {
+  sparkle: string;
+  streamingSparkle: string;
+  inputText: string;
+  placeholder: string;
+  border: string;
+}
+
+const PROMPT_DARK: PromptStyleColors = {
+  sparkle: "#f2cc60",
+  streamingSparkle: "#56a4ff",
+  inputText: "#e6e6e6",
+  placeholder: "#555555",
+  border: "#4d4d4d",
+};
+
+const PROMPT_LIGHT: PromptStyleColors = {
+  sparkle: "#b45309",
+  streamingSparkle: "#2563eb",
+  inputText: "#1f2937",
+  placeholder: "#9ca3af",
+  border: "#d1d5db",
+};
+
+// ── Task Browser Style ───────────────────────────────────
+
+export interface TaskBrowserColors {
+  headerBg: string;
+  headerFg: string;
+  selectedBg: string;
+  selectedFg: string;
+  borderColor: string;
+  runningFg: string;
+  completedFg: string;
+  failedFg: string;
+  killedFg: string;
+  listBg: string;
+}
+
+const TASK_BROWSER_DARK: TaskBrowserColors = {
+  headerBg: "#1f2937",
+  headerFg: "#67e8f9",
+  selectedBg: "#164e63",
+  selectedFg: "#ecfeff",
+  borderColor: "#155e75",
+  runningFg: "#86efac",
+  completedFg: "#56d364",
+  failedFg: "#fca5a5",
+  killedFg: "#fbbf24",
+  listBg: "#0f172a",
+};
+
+const TASK_BROWSER_LIGHT: TaskBrowserColors = {
+  headerBg: "#f3f4f6",
+  headerFg: "#0e7490",
+  selectedBg: "#e0f2fe",
+  selectedFg: "#164e63",
+  borderColor: "#67e8f9",
+  runningFg: "#166534",
+  completedFg: "#166534",
+  failedFg: "#dc2626",
+  killedFg: "#b45309",
+  listBg: "#ffffff",
+};
+
 // ── Public API ─────────────────────────────────────────────
 
 let activeTheme: ThemeName = "dark";
@@ -189,4 +256,12 @@ export function getMessageColors(): MessageColors {
 
 export function getStyles(): ThemeStyles {
   return makeStyles(getMessageColors());
+}
+
+export function getPromptColors(): PromptStyleColors {
+  return activeTheme === "light" ? PROMPT_LIGHT : PROMPT_DARK;
+}
+
+export function getTaskBrowserColors(): TaskBrowserColors {
+  return activeTheme === "light" ? TASK_BROWSER_LIGHT : TASK_BROWSER_DARK;
 }

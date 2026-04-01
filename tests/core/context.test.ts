@@ -91,8 +91,9 @@ describe("Context", () => {
     expect(ctx.tokenCountWithPending).toBeGreaterThan(0);
 
     await ctx.updateTokenCount({ inputTokens: 100, outputTokens: 50 });
-    expect(ctx.tokenCount).toBe(150);
-    expect(ctx.tokenCountWithPending).toBe(150);
+    // Only input tokens count toward context window (output doesn't consume context)
+    expect(ctx.tokenCount).toBe(100);
+    expect(ctx.tokenCountWithPending).toBe(100);
   });
 
   test("restore recovers token count from usage record", async () => {
@@ -102,7 +103,8 @@ describe("Context", () => {
 
     const ctx2 = new Context(contextFile);
     await ctx2.restore();
-    expect(ctx2.tokenCount).toBe(300);
+    // Only input tokens are restored for context tracking
+    expect(ctx2.tokenCount).toBe(200);
   });
 
   // ── Checkpoint and revert ────────────────────────────

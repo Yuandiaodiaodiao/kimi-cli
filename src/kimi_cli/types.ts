@@ -41,7 +41,7 @@ export type ContentPart = z.infer<typeof ContentPart>;
 // ── Message Types ────────────────────────────────────────
 
 export const Message = z.object({
-  role: z.enum(["user", "assistant", "system"]),
+  role: z.enum(["user", "assistant", "system", "tool"]),
   content: z.union([z.string(), z.array(ContentPart)]),
 });
 export type Message = z.infer<typeof Message>;
@@ -101,11 +101,25 @@ export interface StatusSnapshot {
 
 // ── Slash Commands ──────────────────────────────────────
 
+export interface PanelChoiceItem {
+  label: string;
+  value: string;
+  description?: string;
+  current?: boolean;
+}
+
+export type CommandPanelConfig =
+  | { type: "choice"; title: string; items: PanelChoiceItem[]; onSelect: (value: string) => CommandPanelConfig | Promise<CommandPanelConfig | void> | void }
+  | { type: "content"; title: string; content: string }
+  | { type: "input"; title: string; placeholder?: string; password?: boolean; onSubmit: (value: string) => CommandPanelConfig | Promise<CommandPanelConfig | void> | void };
+
 export interface SlashCommand {
   name: string;
   description: string;
   aliases?: string[];
   handler: (args: string) => Promise<void>;
+  /** If defined, selecting from menu renders a secondary panel instead of executing handler */
+  panel?: () => CommandPanelConfig | null;
 }
 
 // ── JSON utility type ───────────────────────────────────

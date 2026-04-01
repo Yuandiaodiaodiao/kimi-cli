@@ -17,25 +17,37 @@ import type { SlashCommand } from "../../types.ts";
 
 interface PromptProps {
   onSubmit: (input: string) => void;
+  onOpenPanel?: (cmd: SlashCommand) => void;
   disabled?: boolean;
   placeholder?: string;
   isStreaming?: boolean;
   commands?: SlashCommand[];
   onSlashMenuChange?: (visible: boolean) => void;
+  /** Incremented by parent to signal "clear the input box" */
+  clearSignal?: number;
 }
 
 export function Prompt({
   onSubmit,
+  onOpenPanel,
   disabled = false,
   placeholder = "Send a message... (/ for commands)",
   isStreaming = false,
   commands = [],
   onSlashMenuChange,
+  clearSignal = 0,
 }: PromptProps) {
   const { value, setValue, historyPrev, historyNext, addToHistory } =
     useInputHistory();
 
   const [slashMenuIndex, setSlashMenuIndex] = useState(0);
+
+  // React to clearSignal from parent (double-Esc)
+  React.useEffect(() => {
+    if (clearSignal > 0) {
+      setValue("");
+    }
+  }, [clearSignal, setValue]);
 
   // Detect slash completion mode
   const isSlashMode =
@@ -75,6 +87,11 @@ export function Prompt({
           const cmd = `/${selected.name}`;
           addToHistory(cmd);
           setValue("");
+          // If the command has a panel, open it instead of submitting
+          if (selected.panel && onOpenPanel) {
+            onOpenPanel(selected);
+            return;
+          }
           onSubmit(cmd);
           return;
         }
@@ -88,6 +105,7 @@ export function Prompt({
     },
     [
       onSubmit,
+      onOpenPanel,
       addToHistory,
       setValue,
       showSlashMenu,

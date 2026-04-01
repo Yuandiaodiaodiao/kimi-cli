@@ -3,42 +3,47 @@
  * Corresponds to Python's ui/shell/visualize.py.
  *
  * Components:
- * - MessageList: renders all messages
- * - Message: single message with role-based styling
- * - ToolCallView: tool call display (collapsible)
- * - StreamingText: streaming text with cursor
+ * - MessageList: renders all messages with step headers
+ * - MessageView: single message with role-based styling
+ * - ToolCallView: tool call display (collapsible) with key argument extraction
+ * - StreamingText: streaming text with cursor + full markdown rendering
  * - ThinkingView: thinking/reasoning display
+ * - CodeBlockView: syntax-highlighted code blocks
+ * - TableView: markdown table rendering
+ * - ErrorRecoveryView: API error classification display
  */
 
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { Box, Text, Newline } from "ink";
 import chalk from "chalk";
-import { getStyles, getMessageColors } from "../theme";
+import { getStyles, getMessageColors, getDiffColors } from "../theme.ts";
 import type {
   UIMessage,
   MessageSegment,
   TextSegment,
   ThinkSegment,
   ToolCallSegment,
-} from "./events";
-import type { ToolResult, DisplayBlock } from "../../wire/types";
+} from "./events.ts";
+import type { ToolResult, DisplayBlock } from "../../wire/types.ts";
 
 // ── MessageList ────────────────────────────────────────────
 
 interface MessageListProps {
   messages: UIMessage[];
   isStreaming: boolean;
+  stepCount?: number;
 }
 
-export function MessageList({ messages, isStreaming }: MessageListProps) {
+export function MessageList({ messages, isStreaming, stepCount }: MessageListProps) {
   return (
-    <Box flexDirection="column" flexGrow={1}>
+    <Box flexDirection="column">
       {messages.map((msg, idx) => (
         <MessageView
           key={msg.id}
           message={msg}
           isLast={idx === messages.length - 1}
           isStreaming={isStreaming && idx === messages.length - 1}
+          stepCount={idx === messages.length - 1 ? stepCount : undefined}
         />
       ))}
     </Box>
@@ -51,9 +56,10 @@ interface MessageViewProps {
   message: UIMessage;
   isLast: boolean;
   isStreaming: boolean;
+  stepCount?: number;
 }
 
-function MessageView({ message, isLast, isStreaming }: MessageViewProps) {
+function MessageView({ message, isLast, isStreaming, stepCount }: MessageViewProps) {
   const colors = getMessageColors();
 
   const roleLabel = getRoleLabel(message.role);
@@ -61,6 +67,12 @@ function MessageView({ message, isLast, isStreaming }: MessageViewProps) {
 
   return (
     <Box flexDirection="column" marginBottom={1}>
+      {/* Step count header for assistant messages */}
+      {message.role === "assistant" && stepCount != null && stepCount > 0 && (
+        <Text color={colors.dim}>
+          ─── Step {stepCount} ───
+        </Text>
+      )}
       <Text color={roleColor} bold>
         {roleLabel}
       </Text>
@@ -75,9 +87,7 @@ function MessageView({ message, isLast, isStreaming }: MessageViewProps) {
   );
 }
 
-function getRoleLabel(
-  role: string,
-): string {
+function getRoleLabel(role: string): string {
   switch (role) {
     case "user":
       return "You";
@@ -138,13 +148,12 @@ interface StreamingTextProps {
 }
 
 export function StreamingText({ text, isStreaming }: StreamingTextProps) {
-  const colors = getMessageColors();
+  const rendered = useMemo(() => renderMarkdown(text), [text]);
+
   return (
-    <Box>
-      <Text color={colors.assistant}>
-        {renderMarkdownInline(text)}
-        {isStreaming ? "▌" : ""}
-      </Text>
+    <Box flexDirection="column">
+      {rendered}
+      {isStreaming && <Text>▌</Text>}
     </Box>
   );
 }
@@ -157,10 +166,16 @@ interface ThinkingViewProps {
 
 export function ThinkingView({ text }: ThinkingViewProps) {
   const colors = getMessageColors();
+  // Truncate thinking to max 6 lines for preview
+  const lines = text.split("\n");
+  const preview = lines.length > 6
+    ? lines.slice(0, 6).join("\n") + `\n… ${lines.length - 6} more lines`
+    : text;
+
   return (
     <Box borderStyle="single" borderColor={colors.thinking} paddingX={1}>
       <Text color={colors.thinking} italic>
-        💭 {text}
+        💭 {preview}
       </Text>
     </Box>
   );
@@ -186,14 +201,15 @@ export function ToolCallView({ toolCall }: ToolCallViewProps) {
       : colors.highlight
     : colors.dim;
 
-  // Format arguments for display
+  // Format arguments for display — extract key argument
   let argsPreview = "";
   try {
     const parsed = JSON.parse(toolCall.arguments);
     const key = extractKeyArgument(toolCall.name, parsed);
     argsPreview = key || truncate(toolCall.arguments, 60);
   } catch {
-    argsPreview = truncate(toolCall.arguments, 60);
+    // Streaming JSON: show partial arguments
+    argsPreview = renderStreamingJson(toolCall.arguments);
   }
 
   return (
@@ -246,6 +262,7 @@ interface DisplayBlockViewProps {
 
 function DisplayBlockView({ block }: DisplayBlockViewProps) {
   const colors = getMessageColors();
+  const diffColors = getDiffColors();
   const b = block as Record<string, unknown>;
 
   switch (block.type) {
@@ -265,7 +282,7 @@ function DisplayBlockView({ block }: DisplayBlockViewProps) {
       return (
         <Box>
           <Text color={colors.dim}>$ </Text>
-          <Text>{b.command as string}</Text>
+          <Text color="#e6e6e6">{b.command as string}</Text>
         </Box>
       );
     case "todo": {
@@ -277,7 +294,15 @@ function DisplayBlockView({ block }: DisplayBlockViewProps) {
         <Box flexDirection="column">
           {items.map((item, idx) => (
             <Box key={idx}>
-              <Text>
+              <Text
+                color={
+                  item.status === "done"
+                    ? "#56d364"
+                    : item.status === "in_progress"
+                      ? "#56a4ff"
+                      : colors.dim
+                }
+              >
                 {item.status === "done"
                   ? "✓"
                   : item.status === "in_progress"
@@ -287,6 +312,16 @@ function DisplayBlockView({ block }: DisplayBlockViewProps) {
               </Text>
             </Box>
           ))}
+        </Box>
+      );
+    }
+    case "background_task": {
+      return (
+        <Box>
+          <Text color="#56a4ff">⟳ </Text>
+          <Text color={colors.dim}>[{b.kind as string}] </Text>
+          <Text>{b.description as string}</Text>
+          <Text color={colors.dim}> ({b.status as string})</Text>
         </Box>
       );
     }
@@ -302,23 +337,419 @@ function DiffView({
 }: {
   block: { path: string; old_text: string; new_text: string };
 }) {
-  const colors = getMessageColors();
+  const diffColors = getDiffColors();
   return (
     <Box flexDirection="column">
-      <Text color={colors.dim}>--- {block.path}</Text>
-      <Text color={colors.dim}>+++ {block.path}</Text>
-      {block.old_text.split("\n").map((line, idx) => (
-        <Text key={`old-${idx}`} color="#ff7b72">
-          - {line}
-        </Text>
-      ))}
-      {block.new_text.split("\n").map((line, idx) => (
-        <Text key={`new-${idx}`} color="#56d364">
-          + {line}
-        </Text>
-      ))}
+      <Text color="#e6e6e6" bold>
+        {block.path}
+      </Text>
+      {block.old_text
+        .split("\n")
+        .filter(Boolean)
+        .map((line, idx) => (
+          <Text key={`old-${idx}`} color="#ff7b72" backgroundColor={diffColors.delBg}>
+            - {line}
+          </Text>
+        ))}
+      {block.new_text
+        .split("\n")
+        .filter(Boolean)
+        .map((line, idx) => (
+          <Text key={`new-${idx}`} color="#56d364" backgroundColor={diffColors.addBg}>
+            + {line}
+          </Text>
+        ))}
     </Box>
   );
+}
+
+// ── ErrorRecoveryView ──────────────────────────────────────
+
+export interface ErrorInfo {
+  type: "rate_limit" | "server_error" | "network" | "auth" | "unknown";
+  message: string;
+  retryable: boolean;
+  retryAfter?: number;
+}
+
+export function ErrorRecoveryView({ error }: { error: ErrorInfo }) {
+  const icon = error.retryable ? "⟳" : "✗";
+  const color = error.retryable ? "#f2cc60" : "#ff7b72";
+  const typeLabel = {
+    rate_limit: "Rate Limited",
+    server_error: "Server Error",
+    network: "Network Error",
+    auth: "Authentication Error",
+    unknown: "Error",
+  }[error.type];
+
+  return (
+    <Box flexDirection="column" marginY={1}>
+      <Box>
+        <Text color={color} bold>
+          {icon} {typeLabel}
+        </Text>
+      </Box>
+      <Box marginLeft={2}>
+        <Text color={color}>{error.message}</Text>
+      </Box>
+      {error.retryable && error.retryAfter && (
+        <Box marginLeft={2}>
+          <Text color="#6b7280" italic>
+            Retrying in {error.retryAfter}s…
+          </Text>
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+/**
+ * Classify API error for display.
+ */
+export function classifyApiError(err: unknown): ErrorInfo {
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = msg.toLowerCase();
+
+  if (lower.includes("429") || lower.includes("rate limit")) {
+    const retryMatch = lower.match(/retry.after.*?(\d+)/);
+    return {
+      type: "rate_limit",
+      message: msg,
+      retryable: true,
+      retryAfter: retryMatch ? parseInt(retryMatch[1]!, 10) : 60,
+    };
+  }
+  if (lower.includes("500") || lower.includes("502") || lower.includes("503") || lower.includes("504")) {
+    return { type: "server_error", message: msg, retryable: true, retryAfter: 5 };
+  }
+  if (lower.includes("timeout") || lower.includes("econnrefused") || lower.includes("network")) {
+    return { type: "network", message: msg, retryable: true, retryAfter: 3 };
+  }
+  if (lower.includes("401") || lower.includes("403") || lower.includes("auth")) {
+    return { type: "auth", message: msg, retryable: false };
+  }
+  return { type: "unknown", message: msg, retryable: false };
+}
+
+// ── Markdown Rendering ─────────────────────────────────────
+
+/**
+ * Full markdown rendering to React Ink components.
+ * Supports: headings, code blocks (with language hint), tables, lists,
+ * blockquotes, horizontal rules, and inline formatting.
+ */
+function renderMarkdown(text: string): React.ReactNode {
+  const lines = text.split("\n");
+  const elements: React.ReactNode[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i]!;
+
+    // Fenced code block
+    const codeMatch = line.match(/^```(\w*)/);
+    if (codeMatch) {
+      const lang = codeMatch[1] || "";
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i]!.startsWith("```")) {
+        codeLines.push(lines[i]!);
+        i++;
+      }
+      if (i < lines.length) i++; // skip closing ```
+      elements.push(
+        <CodeBlockView key={`code-${elements.length}`} code={codeLines.join("\n")} language={lang} />,
+      );
+      continue;
+    }
+
+    // Table detection (| header | header |)
+    if (line.includes("|") && line.trim().startsWith("|")) {
+      const tableLines: string[] = [line];
+      i++;
+      while (i < lines.length && lines[i]!.includes("|") && lines[i]!.trim().startsWith("|")) {
+        tableLines.push(lines[i]!);
+        i++;
+      }
+      if (tableLines.length >= 2) {
+        elements.push(
+          <TableView key={`table-${elements.length}`} lines={tableLines} />,
+        );
+        continue;
+      }
+      // Not a real table, render as text
+      for (const tl of tableLines) {
+        elements.push(
+          <Text key={`text-${elements.length}`}>{renderInlineFormatting(tl)}</Text>,
+        );
+      }
+      continue;
+    }
+
+    // Heading
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)/);
+    if (headingMatch) {
+      const level = headingMatch[1]!.length;
+      const headingText = headingMatch[2]!;
+      const color = level <= 2 ? "#56a4ff" : level <= 4 ? "#e6e6e6" : "#9ca3af";
+      elements.push(
+        <Text key={`h-${elements.length}`} color={color} bold>
+          {level <= 2 ? "█ " : level <= 4 ? "▌ " : "▎ "}{renderInlineFormatting(headingText)}
+        </Text>,
+      );
+      i++;
+      continue;
+    }
+
+    // Blockquote
+    if (line.startsWith("> ") || line === ">") {
+      const quoteLines: string[] = [];
+      while (i < lines.length && (lines[i]!.startsWith("> ") || lines[i] === ">")) {
+        quoteLines.push(lines[i]!.replace(/^>\s?/, ""));
+        i++;
+      }
+      elements.push(
+        <Box key={`quote-${elements.length}`} borderStyle="single" borderLeft borderTop={false} borderRight={false} borderBottom={false} borderColor="#6b7280" paddingLeft={1}>
+          <Text color="#9ca3af" italic>
+            {quoteLines.join("\n")}
+          </Text>
+        </Box>,
+      );
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
+      elements.push(
+        <Text key={`hr-${elements.length}`} color="#555555">
+          {"─".repeat(60)}
+        </Text>,
+      );
+      i++;
+      continue;
+    }
+
+    // Unordered list
+    if (/^\s*[-*+]\s+/.test(line)) {
+      const indent = line.match(/^(\s*)/)?.[1]?.length ?? 0;
+      const bullet = indent >= 4 ? "  ◦ " : indent >= 2 ? " ◦ " : "• ";
+      const content = line.replace(/^\s*[-*+]\s+/, "");
+      elements.push(
+        <Text key={`ul-${elements.length}`}>
+          {"  ".repeat(Math.floor(indent / 2))}{bullet}{renderInlineFormatting(content)}
+        </Text>,
+      );
+      i++;
+      continue;
+    }
+
+    // Ordered list
+    const olMatch = line.match(/^\s*(\d+)[.)]\s+(.*)/);
+    if (olMatch) {
+      const num = olMatch[1]!;
+      const content = olMatch[2]!;
+      elements.push(
+        <Text key={`ol-${elements.length}`}>
+          {"  "}{chalk.bold(num + ".")} {renderInlineFormatting(content)}
+        </Text>,
+      );
+      i++;
+      continue;
+    }
+
+    // Regular text
+    if (line.trim() === "") {
+      elements.push(<Text key={`empty-${elements.length}`}>{" "}</Text>);
+    } else {
+      elements.push(
+        <Text key={`text-${elements.length}`}>{renderInlineFormatting(line)}</Text>,
+      );
+    }
+    i++;
+  }
+
+  return <>{elements}</>;
+}
+
+// ── Code Block View ────────────────────────────────────────
+
+function CodeBlockView({ code, language }: { code: string; language: string }) {
+  const colors = getMessageColors();
+
+  // Simple keyword-based syntax coloring
+  const highlighted = language
+    ? highlightCode(code, language)
+    : code;
+
+  return (
+    <Box flexDirection="column" borderStyle="single" borderColor="#555555" paddingX={1} marginY={0}>
+      {language && (
+        <Text color="#6b7280" italic>
+          {language}
+        </Text>
+      )}
+      <Text>{highlighted}</Text>
+    </Box>
+  );
+}
+
+/**
+ * Simple syntax highlighting using chalk.
+ * Covers common patterns: keywords, strings, comments, numbers.
+ */
+function highlightCode(code: string, language: string): string {
+  const lang = language.toLowerCase();
+
+  // Language-specific keywords
+  const KEYWORDS: Record<string, string[]> = {
+    js: ["const", "let", "var", "function", "return", "if", "else", "for", "while", "class", "import", "export", "from", "async", "await", "new", "this", "try", "catch", "throw", "typeof", "instanceof", "switch", "case", "default", "break", "continue"],
+    ts: ["const", "let", "var", "function", "return", "if", "else", "for", "while", "class", "import", "export", "from", "async", "await", "new", "this", "try", "catch", "throw", "typeof", "instanceof", "interface", "type", "enum", "implements", "extends", "switch", "case", "default", "break", "continue"],
+    typescript: ["const", "let", "var", "function", "return", "if", "else", "for", "while", "class", "import", "export", "from", "async", "await", "new", "this", "try", "catch", "throw", "typeof", "instanceof", "interface", "type", "enum", "implements", "extends", "switch", "case", "default", "break", "continue"],
+    javascript: ["const", "let", "var", "function", "return", "if", "else", "for", "while", "class", "import", "export", "from", "async", "await", "new", "this", "try", "catch", "throw", "typeof", "instanceof", "switch", "case", "default", "break", "continue"],
+    python: ["def", "class", "return", "if", "elif", "else", "for", "while", "import", "from", "as", "try", "except", "raise", "with", "yield", "lambda", "pass", "break", "continue", "and", "or", "not", "in", "is", "None", "True", "False", "self", "async", "await"],
+    py: ["def", "class", "return", "if", "elif", "else", "for", "while", "import", "from", "as", "try", "except", "raise", "with", "yield", "lambda", "pass", "break", "continue", "and", "or", "not", "in", "is", "None", "True", "False", "self", "async", "await"],
+    rust: ["fn", "let", "mut", "const", "if", "else", "for", "while", "loop", "match", "struct", "enum", "impl", "trait", "pub", "use", "mod", "crate", "self", "super", "return", "async", "await", "move", "type", "where"],
+    go: ["func", "var", "const", "if", "else", "for", "range", "switch", "case", "default", "return", "type", "struct", "interface", "package", "import", "go", "chan", "select", "defer", "map", "make", "new", "nil", "true", "false"],
+    bash: ["if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac", "function", "return", "local", "export", "echo", "exit"],
+    sh: ["if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac", "function", "return", "local", "export", "echo", "exit"],
+  };
+
+  const keywords = KEYWORDS[lang] || [];
+  if (keywords.length === 0) return code;
+
+  // Apply highlighting line-by-line
+  return code.split("\n").map((line) => {
+    // Comments
+    if (line.trimStart().startsWith("//") || line.trimStart().startsWith("#")) {
+      return chalk.hex("#6b7280")(line);
+    }
+
+    // String literals (basic)
+    let result = line;
+    result = result.replace(/(["'`])(?:(?!\1|\\).|\\.)*\1/g, (m) => chalk.hex("#a5d6a7")(m));
+
+    // Numbers
+    result = result.replace(/\b(\d+\.?\d*)\b/g, (m) => chalk.hex("#f2cc60")(m));
+
+    // Keywords
+    const kwPattern = new RegExp(`\\b(${keywords.join("|")})\\b`, "g");
+    result = result.replace(kwPattern, (m) => chalk.hex("#c792ea")(m));
+
+    return result;
+  }).join("\n");
+}
+
+// ── Table View ─────────────────────────────────────────────
+
+function TableView({ lines }: { lines: string[] }) {
+  const colors = getMessageColors();
+
+  // Parse table
+  const rows = lines
+    .filter((line) => !line.match(/^\|[\s-:|]+\|$/)) // Skip separator rows
+    .map((line) =>
+      line
+        .split("|")
+        .slice(1, -1)
+        .map((cell) => cell.trim()),
+    );
+
+  if (rows.length === 0) return null;
+
+  const header = rows[0]!;
+  const body = rows.slice(1);
+
+  // Calculate column widths
+  const colWidths = header.map((h, colIdx) => {
+    const maxContent = Math.max(
+      h.length,
+      ...body.map((row) => (row[colIdx] || "").length),
+    );
+    return Math.min(maxContent + 2, 40);
+  });
+
+  const separator = "┼" + colWidths.map((w) => "─".repeat(w)).join("┼") + "┼";
+
+  return (
+    <Box flexDirection="column" marginY={0}>
+      {/* Header */}
+      <Text color="#555555">
+        {"┌" + colWidths.map((w) => "─".repeat(w)).join("┬") + "┐"}
+      </Text>
+      <Text>
+        {"│"}
+        {header.map((cell, idx) => (
+          chalk.bold(cell.padEnd(colWidths[idx]!))
+        )).join("│")}
+        {"│"}
+      </Text>
+      <Text color="#555555">
+        {"├" + colWidths.map((w) => "─".repeat(w)).join("┼") + "┤"}
+      </Text>
+      {/* Body */}
+      {body.map((row, rowIdx) => (
+        <Text key={rowIdx}>
+          {"│"}
+          {row.map((cell, colIdx) => (
+            (cell || "").padEnd(colWidths[colIdx]!)
+          )).join("│")}
+          {"│"}
+        </Text>
+      ))}
+      <Text color="#555555">
+        {"└" + colWidths.map((w) => "─".repeat(w)).join("┴") + "┘"}
+      </Text>
+    </Box>
+  );
+}
+
+// ── Inline Formatting ──────────────────────────────────────
+
+/**
+ * Render inline markdown formatting: bold, italic, code, strikethrough, links.
+ */
+function renderInlineFormatting(text: string): string {
+  return text
+    // Bold + italic
+    .replace(/\*\*\*(.+?)\*\*\*/g, (_, p1) => chalk.bold.italic(p1))
+    // Bold
+    .replace(/\*\*(.+?)\*\*/g, (_, p1) => chalk.bold(p1))
+    // Italic
+    .replace(/\*(.+?)\*/g, (_, p1) => chalk.italic(p1))
+    .replace(/_(.+?)_/g, (_, p1) => chalk.italic(p1))
+    // Strikethrough
+    .replace(/~~(.+?)~~/g, (_, p1) => chalk.strikethrough(p1))
+    // Inline code
+    .replace(/`(.+?)`/g, (_, p1) => chalk.cyan(p1))
+    // Links [text](url)
+    .replace(/\[(.+?)\]\((.+?)\)/g, (_, text, url) =>
+      chalk.underline.hex("#56a4ff")(text) + chalk.hex("#6b7280")(` (${url})`),
+    );
+}
+
+// ── Streaming JSON Rendering ───────────────────────────────
+
+/**
+ * Render partial/streaming JSON arguments for tool calls.
+ * Shows key-value pairs as they arrive.
+ */
+function renderStreamingJson(partial: string): string {
+  // Try to extract readable key-value pairs from partial JSON
+  const pairs: string[] = [];
+  const kvPattern = /"(\w+)":\s*"([^"]*)"?/g;
+  let match;
+  while ((match = kvPattern.exec(partial)) !== null) {
+    const key = match[1]!;
+    const value = match[2]!;
+    if (key.length < 20 && value.length < 80) {
+      pairs.push(`${key}=${truncate(value, 40)}`);
+    }
+  }
+  if (pairs.length > 0) {
+    return pairs.slice(0, 3).join(", ");
+  }
+  return truncate(partial, 60);
 }
 
 // ── Helpers ────────────────────────────────────────────────
@@ -336,10 +767,10 @@ function extractKeyArgument(
   args: Record<string, unknown>,
 ): string {
   // Try common key argument names
-  const keyNames = ["path", "file_path", "command", "query", "url", "name"];
+  const keyNames = ["path", "file_path", "command", "query", "url", "name", "pattern", "description"];
   for (const key of keyNames) {
     if (key in args && typeof args[key] === "string") {
-      return args[key] as string;
+      return truncate(args[key] as string, 80);
     }
   }
   // Fall back to first string argument
@@ -349,16 +780,4 @@ function extractKeyArgument(
     }
   }
   return "";
-}
-
-/**
- * Basic inline markdown rendering (bold, italic, code).
- * For terminal output via Ink's Text component.
- */
-function renderMarkdownInline(text: string): string {
-  // This is a simplified version; chalk handles the styling
-  return text
-    .replace(/\*\*(.+?)\*\*/g, (_, p1) => chalk.bold(p1))
-    .replace(/\*(.+?)\*/g, (_, p1) => chalk.italic(p1))
-    .replace(/`(.+?)`/g, (_, p1) => chalk.cyan(p1));
 }

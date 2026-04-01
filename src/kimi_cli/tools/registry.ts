@@ -1,10 +1,15 @@
 /**
  * Tool registry — register, find, and list all tools.
  * Also acts as a DI container for ToolContext.
+ * Corresponds to Python tools/__init__.py and tools/registry.
  */
 
 import type { CallableTool } from "./base.ts";
 import type { ToolContext, ToolDefinition, ToolResult } from "./types.ts";
+import { SkipThisTool, extractKeyArgument } from "./types.ts";
+
+// Re-export for convenience
+export { SkipThisTool, extractKeyArgument };
 
 export class ToolRegistry {
   private tools = new Map<string, CallableTool>();
@@ -18,12 +23,29 @@ export class ToolRegistry {
     return this._ctx;
   }
 
-  /** Register a tool instance. */
+  /** Register a tool instance. Silently skips if SkipThisTool is thrown during construction. */
   register(tool: CallableTool): void {
     if (this.tools.has(tool.name)) {
       throw new Error(`Tool "${tool.name}" is already registered.`);
     }
     this.tools.set(tool.name, tool);
+  }
+
+  /**
+   * Safely register a tool, catching SkipThisTool during construction.
+   * Returns true if registered, false if skipped.
+   */
+  tryRegister(factory: () => CallableTool): boolean {
+    try {
+      const tool = factory();
+      this.register(tool);
+      return true;
+    } catch (e) {
+      if (e instanceof SkipThisTool) {
+        return false;
+      }
+      throw e;
+    }
   }
 
   /** Find a tool by name. */
@@ -66,5 +88,10 @@ export class ToolRegistry {
     }
 
     return tool.execute(parsed.data, this._ctx);
+  }
+
+  /** Extract a key argument for display/logging from raw JSON arguments. */
+  extractKeyArgument(jsonContent: string, toolName: string): string | null {
+    return extractKeyArgument(jsonContent, toolName);
   }
 }

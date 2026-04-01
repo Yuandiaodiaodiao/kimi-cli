@@ -88,8 +88,8 @@ export class Context {
         if ("_system_prompt" in record) {
           this._systemPrompt = record._system_prompt;
         } else if ("_usage" in record) {
-          this._tokenCount =
-            record._usage.input_tokens + record._usage.output_tokens;
+          // Only input tokens count toward context window (matches Python behavior)
+          this._tokenCount = record._usage.input_tokens;
           lastUsageLineIdx = i;
         } else if ("_checkpoint" in record) {
           this._nextCheckpointId = record._checkpoint.id + 1;
@@ -162,7 +162,8 @@ export class Context {
   // ── Update token count ──────────────────────────
 
   async updateTokenCount(usage: TokenUsage): Promise<void> {
-    this._tokenCount = usage.inputTokens + usage.outputTokens;
+    // Only input tokens count toward context window size (output doesn't consume context)
+    this._tokenCount = usage.inputTokens + (usage.cacheReadTokens ?? 0);
     this._pendingTokenEstimate = 0;
     const record: UsageRecord = {
       _usage: {
@@ -188,6 +189,26 @@ export class Context {
     }
     await this._appendToFile(record);
     return id;
+  }
+
+  // ── Clear context ──────────────────────────────
+
+  async clear(): Promise<void> {
+    // Clear all state, keep system prompt
+    this._history = [];
+    this._tokenCount = 0;
+    this._pendingTokenEstimate = 0;
+    this._nextCheckpointId = 0;
+
+    // Write empty file (with system prompt if present)
+    if (this._systemPrompt) {
+      const record: SystemPromptRecord = {
+        _system_prompt: this._systemPrompt,
+      };
+      await Bun.write(this._filePath, JSON.stringify(record) + "\n");
+    } else {
+      await Bun.write(this._filePath, "");
+    }
   }
 
   // ── Compact (clear and rotate) ─────────────────

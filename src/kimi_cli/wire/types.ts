@@ -10,7 +10,7 @@ import {
   ToolCall,
   ToolReturnValue,
   type JsonValue,
-} from "../types";
+} from "../types.ts";
 
 // ── Display Blocks ─────────────────────────────────────────
 
@@ -61,9 +61,11 @@ export type BackgroundTaskDisplayBlock = z.infer<
   typeof BackgroundTaskDisplayBlock
 >;
 
-export const UnknownDisplayBlock = z.object({
-  type: z.string(),
-}).passthrough();
+export const UnknownDisplayBlock = z
+  .object({
+    type: z.string(),
+  })
+  .passthrough();
 export type UnknownDisplayBlock = z.infer<typeof UnknownDisplayBlock>;
 
 export const DisplayBlock = z.union([
@@ -196,7 +198,7 @@ export const PlanDisplay = z.object({
 });
 export type PlanDisplay = z.infer<typeof PlanDisplay>;
 
-// ── Content Part types (re-exported from types.ts) ─────────
+// ── Content Part types ─────────────────────────────────────
 
 export const TextPart = z.object({
   type: z.literal("text"),
@@ -210,6 +212,24 @@ export const ThinkPart = z.object({
 
 export const ImageURLPart = z.object({
   type: z.literal("image"),
+  source: z.object({
+    type: z.enum(["base64", "url"]),
+    mediaType: z.string().optional(),
+    data: z.string(),
+  }),
+});
+
+export const AudioURLPart = z.object({
+  type: z.literal("audio"),
+  source: z.object({
+    type: z.enum(["base64", "url"]),
+    mediaType: z.string().optional(),
+    data: z.string(),
+  }),
+});
+
+export const VideoURLPart = z.object({
+  type: z.literal("video"),
   source: z.object({
     type: z.enum(["base64", "url"]),
     mediaType: z.string().optional(),
@@ -249,7 +269,7 @@ export const ApprovalResponse = z.object({
 });
 export type ApprovalResponse = z.infer<typeof ApprovalResponse>;
 
-export const ApprovalRequest = z.object({
+export const ApprovalRequestSchema = z.object({
   id: z.string(),
   tool_call_id: z.string(),
   sender: z.string(),
@@ -265,7 +285,10 @@ export const ApprovalRequest = z.object({
   source_description: z.string().nullable().default(null),
   display: z.array(DisplayBlock).default([]),
 });
-export type ApprovalRequest = z.infer<typeof ApprovalRequest>;
+export type ApprovalRequest = z.infer<typeof ApprovalRequestSchema>;
+
+// Keep original schema name for registry
+export const ApprovalRequest = ApprovalRequestSchema;
 
 // ── Question ───────────────────────────────────────────────
 
@@ -292,12 +315,14 @@ export const QuestionResponse = z.object({
 });
 export type QuestionResponse = z.infer<typeof QuestionResponse>;
 
-export const QuestionRequest = z.object({
+export const QuestionRequestSchema = z.object({
   id: z.string(),
   tool_call_id: z.string(),
   questions: z.array(QuestionItem),
 });
-export type QuestionRequest = z.infer<typeof QuestionRequest>;
+export type QuestionRequest = z.infer<typeof QuestionRequestSchema>;
+
+export const QuestionRequest = QuestionRequestSchema;
 
 export class QuestionNotSupported extends Error {
   constructor() {
@@ -308,12 +333,14 @@ export class QuestionNotSupported extends Error {
 
 // ── Tool Call Request ──────────────────────────────────────
 
-export const ToolCallRequest = z.object({
+export const ToolCallRequestSchema = z.object({
   id: z.string(),
   name: z.string(),
   arguments: z.string().nullable(),
 });
-export type ToolCallRequest = z.infer<typeof ToolCallRequest>;
+export type ToolCallRequest = z.infer<typeof ToolCallRequestSchema>;
+
+export const ToolCallRequest = ToolCallRequestSchema;
 
 // ── Hook ───────────────────────────────────────────────────
 
@@ -324,16 +351,18 @@ export const HookResponse = z.object({
 });
 export type HookResponse = z.infer<typeof HookResponse>;
 
-export const HookRequest = z.object({
+export const HookRequestSchema = z.object({
   id: z.string(),
   subscription_id: z.string().default(""),
   event: z.string(),
   target: z.string().default(""),
   input_data: z.record(z.string(), z.unknown()).default({}),
 });
-export type HookRequest = z.infer<typeof HookRequest>;
+export type HookRequest = z.infer<typeof HookRequestSchema>;
 
-// ── SubagentEvent (forward reference handled via lazy parsing) ──
+export const HookRequest = HookRequestSchema;
+
+// ── SubagentEvent ──────────────────────────────────────────
 
 export const SubagentEvent = z.object({
   parent_tool_call_id: z.string().nullable().default(null),
@@ -342,6 +371,164 @@ export const SubagentEvent = z.object({
   event: z.record(z.string(), z.unknown()), // envelope: { type, payload }
 });
 export type SubagentEvent = z.infer<typeof SubagentEvent>;
+
+// ── Promise-based Async Resolution Wrappers ────────────────
+
+/**
+ * Wraps a Request with a Promise for async resolution.
+ * Corresponds to Python's Future-based pattern on ApprovalRequest, etc.
+ */
+export class Deferred<T> {
+  readonly promise: Promise<T>;
+  private _resolve!: (value: T) => void;
+  private _reject!: (err: Error) => void;
+  private _settled = false;
+
+  constructor() {
+    this.promise = new Promise<T>((resolve, reject) => {
+      this._resolve = resolve;
+      this._reject = reject;
+    });
+  }
+
+  get settled(): boolean {
+    return this._settled;
+  }
+
+  resolve(value: T): void {
+    if (!this._settled) {
+      this._settled = true;
+      this._resolve(value);
+    }
+  }
+
+  reject(err: Error): void {
+    if (!this._settled) {
+      this._settled = true;
+      this._reject(err);
+    }
+  }
+}
+
+/** ApprovalRequest with async resolution. */
+export class PendingApprovalRequest {
+  readonly data: ApprovalRequest;
+  private _deferred = new Deferred<ApprovalResponseKind>();
+  private _feedback = "";
+
+  constructor(data: ApprovalRequest) {
+    this.data = data;
+  }
+
+  get id(): string {
+    return this.data.id;
+  }
+
+  get resolved(): boolean {
+    return this._deferred.settled;
+  }
+
+  get feedback(): string {
+    return this._feedback;
+  }
+
+  async wait(): Promise<ApprovalResponseKind> {
+    return this._deferred.promise;
+  }
+
+  resolve(response: ApprovalResponseKind, feedback = ""): void {
+    this._feedback = feedback;
+    this._deferred.resolve(response);
+  }
+}
+
+/** QuestionRequest with async resolution. */
+export class PendingQuestionRequest {
+  readonly data: QuestionRequest;
+  private _deferred = new Deferred<Record<string, string>>();
+
+  constructor(data: QuestionRequest) {
+    this.data = data;
+  }
+
+  get id(): string {
+    return this.data.id;
+  }
+
+  get resolved(): boolean {
+    return this._deferred.settled;
+  }
+
+  async wait(): Promise<Record<string, string>> {
+    return this._deferred.promise;
+  }
+
+  resolve(answers: Record<string, string>): void {
+    this._deferred.resolve(answers);
+  }
+
+  setException(err: Error): void {
+    this._deferred.reject(err);
+  }
+}
+
+/** ToolCallRequest with async resolution. */
+export class PendingToolCallRequest {
+  readonly data: ToolCallRequest;
+  private _deferred = new Deferred<unknown>();
+
+  constructor(data: ToolCallRequest) {
+    this.data = data;
+  }
+
+  get id(): string {
+    return this.data.id;
+  }
+
+  get resolved(): boolean {
+    return this._deferred.settled;
+  }
+
+  async wait(): Promise<unknown> {
+    return this._deferred.promise;
+  }
+
+  resolve(result: unknown): void {
+    this._deferred.resolve(result);
+  }
+}
+
+/** HookRequest with async resolution. */
+export class PendingHookRequest {
+  readonly data: HookRequest;
+  private _deferred = new Deferred<{ action: "allow" | "block"; reason: string }>();
+
+  constructor(data: HookRequest) {
+    this.data = data;
+  }
+
+  get id(): string {
+    return this.data.id;
+  }
+
+  get resolved(): boolean {
+    return this._deferred.settled;
+  }
+
+  async wait(): Promise<{ action: "allow" | "block"; reason: string }> {
+    return this._deferred.promise;
+  }
+
+  resolve(action: "allow" | "block", reason = ""): void {
+    this._deferred.resolve({ action, reason });
+  }
+}
+
+export type PendingRequest =
+  | PendingApprovalRequest
+  | PendingQuestionRequest
+  | PendingToolCallRequest
+  | PendingHookRequest;
 
 // ── Union Types ────────────────────────────────────────────
 
@@ -384,7 +571,7 @@ export type WireMessage = Event | Request;
 
 // ── Name → Schema registry ────────────────────────────────
 
-const _wireMessageSchemas: Record<string, z.ZodType<unknown>> = {
+export const _wireMessageSchemas: Record<string, z.ZodType<unknown>> = {
   TurnBegin,
   SteerInput,
   TurnEnd,
@@ -411,6 +598,8 @@ const _wireMessageSchemas: Record<string, z.ZodType<unknown>> = {
   TextPart,
   ThinkPart,
   ImageURLPart,
+  AudioURLPart,
+  VideoURLPart,
   ToolCallPart,
   ToolCall,
   // Backwards compatibility
@@ -439,6 +628,8 @@ const _eventTypeNames = new Set([
   "TextPart",
   "ThinkPart",
   "ImageURLPart",
+  "AudioURLPart",
+  "VideoURLPart",
   "ToolCallPart",
   "ToolCall",
   "ApprovalRequestResolved",

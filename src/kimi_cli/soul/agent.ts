@@ -37,6 +37,7 @@ export class Runtime {
   hookEngine: HookEngine;
   builtinArgs: BuiltinSystemPromptArgs;
   role: "root" | "subagent";
+  additionalDirs: string[];
 
   constructor(opts: {
     config: Config;
@@ -46,6 +47,7 @@ export class Runtime {
     hookEngine: HookEngine;
     builtinArgs: BuiltinSystemPromptArgs;
     role?: "root" | "subagent";
+    additionalDirs?: string[];
   }) {
     this.config = opts.config;
     this.llm = opts.llm;
@@ -54,6 +56,7 @@ export class Runtime {
     this.hookEngine = opts.hookEngine;
     this.builtinArgs = opts.builtinArgs;
     this.role = opts.role ?? "root";
+    this.additionalDirs = opts.additionalDirs ?? [];
   }
 
   get loopControl(): LoopControl {
@@ -91,12 +94,26 @@ export class Runtime {
       KIMI_NOW: new Date().toISOString(),
       KIMI_WORK_DIR: workDir,
       KIMI_WORK_DIR_LS: workDirLs,
-      KIMI_AGENTS_MD: "", // TODO: scan for AGENTS.md
+      KIMI_AGENTS_MD: await loadAgentsMd(workDir) ?? "",
       KIMI_SKILLS: "", // TODO: list skills
-      KIMI_ADDITIONAL_DIRS_INFO: "",
+      KIMI_ADDITIONAL_DIRS_INFO: opts.session.state.additional_dirs.length > 0
+        ? `Additional directories: ${opts.session.state.additional_dirs.join(", ")}`
+        : "",
       KIMI_OS: osType,
       KIMI_SHELL: shell,
     };
+
+    // Restore additional directories from session state
+    const additionalDirs = opts.session.state.additional_dirs.filter(
+      (d: string) => {
+        try {
+          const { statSync } = require("node:fs");
+          return statSync(d).isDirectory();
+        } catch {
+          return false;
+        }
+      },
+    );
 
     // Restore approval state from session
     const approvalState = new ApprovalState({
@@ -116,6 +133,7 @@ export class Runtime {
       approval,
       hookEngine: opts.hookEngine,
       builtinArgs,
+      additionalDirs,
     });
   }
 
@@ -132,6 +150,8 @@ export class Runtime {
         KIMI_NOW: new Date().toISOString(),
       },
       role: "subagent",
+      // Share the same list reference so /add-dir mutations propagate to all agents
+      additionalDirs: this.additionalDirs,
     });
   }
 }
@@ -307,4 +327,119 @@ async function registerBuiltinTools(toolset: KimiToolset): Promise<void> {
       logger.warn(`Failed to load tool module: ${err}`);
     }
   }
+}
+
+// ── AGENTS.md loader ────────────────────────────────
+
+const AGENTS_MD_MAX_BYTES = 32 * 1024; // 32 KiB
+
+/**
+ * Find the nearest git root by walking up from workDir.
+ */
+async function findProjectRoot(workDir: string): Promise<string> {
+  const { resolve, dirname } = await import("node:path");
+  let current = resolve(workDir);
+  while (true) {
+    const gitFile = Bun.file(`${current}/.git`);
+    if (await gitFile.exists()) return current;
+    const parent = dirname(current);
+    if (parent === current) return resolve(workDir);
+    current = parent;
+  }
+}
+
+/**
+ * Return the list of directories from projectRoot down to workDir (inclusive).
+ */
+function dirsRootToLeaf(workDir: string, projectRoot: string): string[] {
+  const { resolve, dirname } = require("node:path");
+  const dirs: string[] = [];
+  let current = resolve(workDir);
+  const root = resolve(projectRoot);
+  while (true) {
+    dirs.push(current);
+    if (current === root) break;
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  dirs.reverse(); // root → leaf
+  return dirs;
+}
+
+/**
+ * Discover and merge AGENTS.md files from the project root down to workDir.
+ * Matches Python's `load_agents_md` behavior.
+ */
+export async function loadAgentsMd(workDir: string): Promise<string | null> {
+  const projectRoot = await findProjectRoot(workDir);
+  const dirs = dirsRootToLeaf(workDir, projectRoot);
+
+  // Phase 1: collect all candidate files (root → leaf order)
+  const discovered: { path: string; content: string }[] = [];
+  for (const d of dirs) {
+    const candidates: string[] = [];
+
+    // .kimi/AGENTS.md — highest priority
+    const kimiPath = `${d}/.kimi/AGENTS.md`;
+    if (await Bun.file(kimiPath).exists()) {
+      candidates.push(kimiPath);
+    }
+
+    // AGENTS.md or agents.md — mutually exclusive
+    const upperPath = `${d}/AGENTS.md`;
+    const lowerPath = `${d}/agents.md`;
+    if (await Bun.file(upperPath).exists()) {
+      candidates.push(upperPath);
+    } else if (await Bun.file(lowerPath).exists()) {
+      candidates.push(lowerPath);
+    }
+
+    for (const path of candidates) {
+      const content = (await Bun.file(path).text()).trim();
+      if (content) {
+        discovered.push({ path, content });
+        logger.info(`Loaded agents.md: ${path}`);
+      }
+    }
+  }
+
+  if (discovered.length === 0) return null;
+
+  // Phase 2: allocate budget leaf-first
+  let remaining = AGENTS_MD_MAX_BYTES;
+  const budgeted: { path: string; content: string }[] = new Array(discovered.length);
+  for (let i = discovered.length - 1; i >= 0; i--) {
+    const { path, content } = discovered[i]!;
+    const annotation = `<!-- From: ${path} -->\n`;
+    const separatorCost = i < discovered.length - 1 ? 2 : 0; // "\n\n"
+    const overhead = Buffer.byteLength(annotation) + separatorCost;
+    remaining -= overhead;
+    if (remaining <= 0) {
+      budgeted[i] = { path, content: "" };
+      remaining = 0;
+      continue;
+    }
+    const encoded = Buffer.from(content);
+    if (encoded.length > remaining) {
+      budgeted[i] = {
+        path,
+        content: encoded.subarray(0, remaining).toString("utf-8").trim(),
+      };
+      remaining = 0;
+    } else {
+      budgeted[i] = { path, content };
+      remaining -= encoded.length;
+    }
+  }
+
+  // Phase 3: assemble root → leaf
+  const parts: string[] = [];
+  for (const { path, content } of budgeted) {
+    if (content) {
+      parts.push(`<!-- From: ${path} -->\n${content}`);
+    }
+  }
+
+  return parts.length > 0 ? parts.join("\n\n") : null;
 }

@@ -3,10 +3,12 @@
  * Corresponds to Python tools/file/replace.py
  */
 
+import { resolve } from "node:path";
 import { z } from "zod/v4";
 import { CallableTool } from "../base.ts";
 import type { ToolContext, ToolResult } from "../types.ts";
 import { ToolError } from "../types.ts";
+import { inspectPlanEditTarget } from "./plan_mode.ts";
 
 const DESCRIPTION = `Replace specific strings within a specified file.
 
@@ -45,7 +47,7 @@ function resolvePath(filePath: string, workingDir: string): string {
     }
     return filePath;
   }
-  return `${workingDir}/${filePath}`;
+  return resolve(workingDir, filePath);
 }
 
 function applyEdit(content: string, edit: Edit): string {
@@ -62,6 +64,16 @@ export class StrReplaceFile extends CallableTool<typeof ParamsSchema> {
   readonly description = DESCRIPTION;
   readonly schema = ParamsSchema;
 
+  /** Optional plan mode bindings. */
+  private _planModeChecker?: () => boolean;
+  private _planFilePathGetter?: () => string | null;
+
+  /** Bind plan mode state checker and plan file path getter. */
+  bindPlanMode(checker: () => boolean, pathGetter: () => string | null): void {
+    this._planModeChecker = checker;
+    this._planFilePathGetter = pathGetter;
+  }
+
   async execute(params: Params, ctx: ToolContext): Promise<ToolResult> {
     if (!params.path) {
       return ToolError("File path cannot be empty.");
@@ -69,9 +81,26 @@ export class StrReplaceFile extends CallableTool<typeof ParamsSchema> {
 
     try {
       const resolvedPath = resolvePath(params.path, ctx.workingDir);
+
+      // Check plan mode restrictions
+      const planTarget = inspectPlanEditTarget(resolvedPath, {
+        planModeChecker: this._planModeChecker ?? ctx.getPlanMode,
+        planFilePathGetter: this._planFilePathGetter,
+      });
+      if ("isError" in planTarget && planTarget.isError) {
+        return planTarget;
+      }
+      const isPlanFileEdit = !("isError" in planTarget) && planTarget.isPlanTarget;
+
       const file = Bun.file(resolvedPath);
 
       if (!(await file.exists())) {
+        if (isPlanFileEdit) {
+          return ToolError(
+            "The current plan file does not exist yet. " +
+              "Use WriteFile to create it before calling StrReplaceFile.",
+          );
+        }
         return ToolError(`\`${params.path}\` does not exist.`);
       }
 
@@ -106,25 +135,28 @@ export class StrReplaceFile extends CallableTool<typeof ParamsSchema> {
         );
       }
 
-      // Request approval — include diff preview
-      const diffLines: string[] = [];
-      for (const edit of edits) {
-        if (edit.old.length < 200 && edit.new.length < 200) {
-          diffLines.push(`-${edit.old.split("\n").join("\n-")}`);
-          diffLines.push(`+${edit.new.split("\n").join("\n+")}`);
+      // Plan file edits are auto-approved; all other edits need approval
+      if (!isPlanFileEdit) {
+        // Build diff preview
+        const diffLines: string[] = [];
+        for (const edit of edits) {
+          if (edit.old.length < 200 && edit.new.length < 200) {
+            diffLines.push(`-${edit.old.split("\n").join("\n-")}`);
+            diffLines.push(`+${edit.new.split("\n").join("\n+")}`);
+          }
         }
-      }
-      const diffPreview = diffLines.length > 0 ? `\n${diffLines.join("\n")}` : "";
+        const diffPreview = diffLines.length > 0 ? `\n${diffLines.join("\n")}` : "";
 
-      const decision = await ctx.approval(
-        "StrReplaceFile",
-        "edit",
-        `Edit file \`${resolvedPath}\` (${edits.length} edit(s))${diffPreview}`,
-      );
-      if (decision === "reject") {
-        return ToolError(
-          "The tool call is rejected by the user. Stop what you are doing and wait for the user to tell you how to proceed.",
+        const decision = await ctx.approval(
+          "StrReplaceFile",
+          "edit",
+          `Edit file \`${resolvedPath}\` (${edits.length} edit(s))${diffPreview}`,
         );
+        if (decision === "reject") {
+          return ToolError(
+            "The tool call is rejected by the user. Stop what you are doing and wait for the user to tell you how to proceed.",
+          );
+        }
       }
 
       // Write the modified content back

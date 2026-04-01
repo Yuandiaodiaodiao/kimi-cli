@@ -83,7 +83,7 @@ export class FetchURL extends CallableTool<typeof ParamsSchema> {
       // Extract main content from HTML
       const extracted = extractContent(respText);
 
-      if (!extracted || extracted.length < 50) {
+      if (!extracted || extracted.length < 10) {
         return builder.error(
           "Failed to extract meaningful content from the page. " +
             "The page may require JavaScript to render its content.",

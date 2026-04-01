@@ -33,7 +33,7 @@ export function isSystemReminderMessage(message: Message): boolean {
 /** Build a tool result message from output. */
 export function toolResultMessage(opts: {
   toolCallId: string;
-  output: string;
+  output: string | ContentPart | ContentPart[];
   isError?: boolean;
   message?: string;
 }): Message {
@@ -42,23 +42,24 @@ export function toolResultMessage(opts: {
   if (opts.isError) {
     const errMsg = opts.message ?? "Unknown error";
     parts.push(system(`ERROR: ${errMsg}`));
-    if (opts.output) {
-      parts.push({ type: "text", text: opts.output });
-    }
+    const outputParts = outputToContentParts(opts.output);
+    parts.push(...outputParts);
   } else {
     if (opts.message) {
       parts.push(system(opts.message));
     }
-    if (opts.output) {
-      parts.push({ type: "text", text: opts.output });
-    }
+    const outputParts = outputToContentParts(opts.output);
+    parts.push(...outputParts);
     if (parts.length === 0) {
       parts.push(system("Tool output is empty."));
+    } else if (!parts.some((p) => p.type === "text")) {
+      // Ensure at least one TextPart exists so the LLM API won't reject
+      parts.unshift(system("Tool returned non-text content."));
     }
   }
 
   return {
-    role: "user", // tool results sent as user messages with tool_result parts
+    role: "tool",
     content: [
       {
         type: "tool_result",
@@ -70,6 +71,20 @@ export function toolResultMessage(opts: {
   };
 }
 
+/** Convert various output formats to ContentPart array. */
+function outputToContentParts(
+  output: string | ContentPart | ContentPart[],
+): ContentPart[] {
+  if (typeof output === "string") {
+    return output ? [{ type: "text", text: output }] : [];
+  }
+  if (Array.isArray(output)) {
+    return output;
+  }
+  // Single ContentPart
+  return [output];
+}
+
 /** Check message content for required model capabilities, return missing ones. */
 export function checkMessage(
   message: Message,
@@ -79,7 +94,8 @@ export function checkMessage(
   const content = typeof message.content === "string" ? [] : message.content;
   for (const part of content) {
     if (part.type === "image") needed.add("image_in");
-    // video_in and thinking checks can be added when those part types exist
+    if (part.type === "video") needed.add("video_in");
+    if (part.type === "thinking") needed.add("thinking");
   }
   // Return only the capabilities that are missing
   const missing = new Set<ModelCapability>();

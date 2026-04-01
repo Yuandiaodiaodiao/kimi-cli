@@ -3,7 +3,8 @@
  * Shell-level commands: /clear, /help, /exit, /theme, /version.
  */
 
-import type { SlashCommand } from "../../types";
+import type { SlashCommand, CommandPanelConfig } from "../../types";
+import { getActiveTheme } from "../theme.ts";
 
 export type SlashCommandHandler = (args: string) => Promise<void>;
 
@@ -11,6 +12,8 @@ export interface ShellSlashContext {
   clearMessages: () => void;
   exit: () => void;
   setTheme: (theme: "dark" | "light") => void;
+  getAllCommands: () => SlashCommand[];
+  pushNotification: (title: string, body: string) => void;
 }
 
 /**
@@ -41,8 +44,17 @@ export function createShellSlashCommands(
       description: "Show help information",
       aliases: ["h", "?"],
       handler: async () => {
-        // Help text is printed inline
-        console.log(formatHelp());
+        // Fallback when panel is not used (e.g. direct /help invocation)
+        const allCmds = ctx.getAllCommands();
+        ctx.pushNotification("Help", formatHelp(allCmds));
+      },
+      panel: (): CommandPanelConfig => {
+        const allCmds = ctx.getAllCommands();
+        return {
+          type: "content",
+          title: "Help",
+          content: formatHelp(allCmds),
+        };
       },
     },
     {
@@ -52,17 +64,37 @@ export function createShellSlashCommands(
         const theme = args.trim() as "dark" | "light";
         if (theme === "dark" || theme === "light") {
           ctx.setTheme(theme);
+          ctx.pushNotification("Theme", `Switched to ${theme} theme.`);
         } else {
           // Toggle
-          ctx.setTheme("dark"); // TODO: read current and toggle
+          const current = getActiveTheme();
+          const next = current === "dark" ? "light" : "dark";
+          ctx.setTheme(next);
+          ctx.pushNotification("Theme", `Switched to ${next} theme.`);
         }
+      },
+      panel: (): CommandPanelConfig => {
+        const current = getActiveTheme();
+        return {
+          type: "choice",
+          title: "Theme",
+          items: [
+            { label: "🌙 Dark", value: "dark", current: current === "dark" },
+            { label: "☀️  Light", value: "light", current: current === "light" },
+          ],
+          onSelect: (value: string) => {
+            const theme = value as "dark" | "light";
+            ctx.setTheme(theme);
+            ctx.pushNotification("Theme", `Switched to ${theme} theme.`);
+          },
+        };
       },
     },
     {
       name: "version",
       description: "Show version information",
       handler: async () => {
-        console.log("kimi-cli v2.0.0 (TypeScript)");
+        ctx.pushNotification("Version", "kimi-cli v2.0.0 (TypeScript)");
       },
     },
   ];
@@ -100,24 +132,38 @@ export function findSlashCommand(
   );
 }
 
-function formatHelp(): string {
+function formatHelp(commands: SlashCommand[]): string {
   const lines = [
+    "Kimi Code CLI — Help",
     "",
-    "  Kimi Code CLI — Commands",
+    "Keyboard Shortcuts:",
+    "  Ctrl+X             Toggle agent/shell mode",
+    "  Shift+Tab          Toggle plan mode",
+    "  Ctrl+O             Edit in external editor",
+    "  Ctrl+J / Alt+Enter Insert newline",
+    "  Ctrl+V             Paste (supports images)",
+    "  Ctrl+D             Exit",
+    "  Ctrl+C             Interrupt",
     "",
-    "  Slash Commands:",
-    "    /help, /h, /?     Show this help",
-    "    /clear, /cls       Clear conversation",
-    "    /exit, /quit, /q   Exit",
-    "    /theme [dark|light] Toggle theme",
-    "    /version           Show version",
-    "",
-    "  Keyboard Shortcuts:",
-    "    Ctrl+C             Interrupt / Exit (double press)",
-    "    Ctrl+D             Exit",
-    "    Up/Down            Navigate history",
-    "    Enter              Submit message",
-    "",
+    "Slash Commands:",
   ];
+
+  // Deduplicate by name and sort
+  const seen = new Set<string>();
+  const sorted = commands
+    .filter((c) => {
+      if (seen.has(c.name)) return false;
+      seen.add(c.name);
+      return true;
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  for (const cmd of sorted) {
+    const aliases = cmd.aliases?.length ? `, /${cmd.aliases.join(", /")}` : "";
+    const nameStr = `/${cmd.name}${aliases}`;
+    lines.push(`  ${nameStr.padEnd(22)} ${cmd.description}`);
+  }
+
+  lines.push("");
   return lines.join("\n");
 }

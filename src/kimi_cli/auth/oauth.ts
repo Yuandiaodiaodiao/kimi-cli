@@ -5,9 +5,19 @@
 
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { hostname, platform, arch } from "node:os";
-import { getShareDir } from "../config.ts";
+import { hostname, platform, arch, release } from "node:os";
+import { getShareDir, type Config, saveConfig } from "../config.ts";
 import type { OAuthRef } from "../config.ts";
+import { getVersion } from "../constant.ts";
+import {
+  KIMI_CODE_PLATFORM_ID,
+  getPlatformById,
+  listModels,
+  managedProviderKey,
+  managedModelKey,
+  deriveModelCapabilities,
+  type ModelInfo,
+} from "./platforms.ts";
 import { logger } from "../utils/logging.ts";
 
 // ── Constants ───────────────────────────────────────────
@@ -42,7 +52,7 @@ export class OAuthDeviceExpired extends OAuthError {
   }
 }
 
-// ── Token types ─────────────────────────────────────────
+// ── Event / Token types ─────────────────────────────────
 
 export type OAuthEventKind = "info" | "error" | "waiting" | "verification_url" | "success";
 
@@ -76,8 +86,7 @@ function oauthHost(): string {
 }
 
 function credentialsDir(): string {
-  const dir = join(getShareDir(), "credentials");
-  return dir;
+  return join(getShareDir(), "credentials");
 }
 
 function credentialsPath(key: string): string {
@@ -113,9 +122,10 @@ function deviceModel(): string {
 export async function commonHeaders(): Promise<Record<string, string>> {
   return {
     "X-Msh-Platform": "kimi_cli",
-    "X-Msh-Version": "2.0.0",
+    "X-Msh-Version": getVersion(),
     "X-Msh-Device-Name": hostname(),
     "X-Msh-Device-Model": deviceModel(),
+    "X-Msh-Os-Version": release(),
     "X-Msh-Device-Id": await getDeviceId(),
   };
 }
@@ -170,6 +180,29 @@ export async function requestDeviceAuthorization(): Promise<DeviceAuthorization>
   };
 }
 
+/** Poll the token endpoint once. Corresponds to Python _request_device_token. */
+async function requestDeviceToken(auth: DeviceAuthorization): Promise<{ status: number; data: Record<string, unknown> }> {
+  const host = oauthHost().replace(/\/+$/, "");
+  const headers = await commonHeaders();
+  try {
+    const res = await fetch(`${host}/api/oauth/token`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: KIMI_CODE_CLIENT_ID,
+        device_code: auth.device_code,
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      }),
+    });
+    const data = (await res.json()) as Record<string, unknown>;
+    if (res.status >= 500) throw new OAuthError(`Token polling server error: ${res.status}.`);
+    return { status: res.status, data };
+  } catch (err) {
+    if (err instanceof OAuthError) throw err;
+    throw new OAuthError("Token polling request failed.");
+  }
+}
+
 export async function refreshToken(refreshTokenValue: string): Promise<OAuthToken> {
   const host = oauthHost().replace(/\/+$/, "");
   const headers = await commonHeaders();
@@ -196,6 +229,229 @@ export async function refreshToken(refreshTokenValue: string): Promise<OAuthToke
     scope: String(data.scope),
     token_type: String(data.token_type),
   };
+}
+
+// ── Kimi Code login/logout (async generator) ────────────
+
+function selectDefaultModelAndThinking(models: ModelInfo[]): { model: ModelInfo; thinking: boolean } | null {
+  if (!models.length) return null;
+  const model = models[0]!;
+  const caps = deriveModelCapabilities(model);
+  const thinking = caps.has("thinking") || caps.has("always_thinking");
+  return { model, thinking };
+}
+
+function applyKimiCodeConfig(
+  config: Config,
+  opts: {
+    models: ModelInfo[];
+    selectedModel: ModelInfo;
+    thinking: boolean;
+    oauthRef: OAuthRef;
+  },
+): void {
+  const plat = getPlatformById(KIMI_CODE_PLATFORM_ID);
+  if (!plat) throw new OAuthError("Kimi Code platform not found.");
+
+  const providerKey = managedProviderKey(plat.id);
+  config.providers[providerKey] = {
+    type: "kimi",
+    base_url: plat.baseUrl,
+    api_key: "",
+    oauth: opts.oauthRef,
+  };
+
+  // Remove old models for this provider
+  for (const [key, model] of Object.entries(config.models)) {
+    if (model.provider === providerKey) delete config.models[key];
+  }
+
+  // Add fresh models
+  for (const modelInfo of opts.models) {
+    const caps = deriveModelCapabilities(modelInfo);
+    config.models[managedModelKey(plat.id, modelInfo.id)] = {
+      provider: providerKey,
+      model: modelInfo.id,
+      max_context_size: modelInfo.contextLength,
+      capabilities: caps.size > 0 ? ([...caps] as any) : undefined,
+    };
+  }
+
+  config.default_model = managedModelKey(plat.id, opts.selectedModel.id);
+  config.default_thinking = opts.thinking;
+
+  if (plat.searchUrl) {
+    config.services = config.services ?? {};
+    (config.services as any).moonshot_search = {
+      base_url: plat.searchUrl,
+      api_key: "",
+      oauth: opts.oauthRef,
+    };
+  }
+  if (plat.fetchUrl) {
+    config.services = config.services ?? {};
+    (config.services as any).moonshot_fetch = {
+      base_url: plat.fetchUrl,
+      api_key: "",
+      oauth: opts.oauthRef,
+    };
+  }
+}
+
+/**
+ * Run the Kimi Code OAuth device-code login flow.
+ * Yields OAuthEvent objects for UI display.
+ * Corresponds to Python login_kimi_code().
+ */
+export async function* loginKimiCode(
+  config: Config,
+  opts: { openBrowser?: boolean } = {},
+): AsyncGenerator<OAuthEvent> {
+  const plat = getPlatformById(KIMI_CODE_PLATFORM_ID);
+  if (!plat) {
+    yield { type: "error", message: "Kimi Code platform is unavailable." };
+    return;
+  }
+
+  let token: OAuthToken | null = null;
+
+  // Retry loop — device codes can expire
+  while (true) {
+    let auth: DeviceAuthorization;
+    try {
+      auth = await requestDeviceAuthorization();
+    } catch (err) {
+      yield { type: "error", message: `Login failed: ${err}` };
+      return;
+    }
+
+    yield { type: "info", message: "Please visit the following URL to finish authorization." };
+    yield {
+      type: "verification_url",
+      message: `Verification URL: ${auth.verification_uri_complete}`,
+      data: { verification_url: auth.verification_uri_complete, user_code: auth.user_code },
+    };
+
+    if (opts.openBrowser !== false) {
+      try {
+        // Use Bun.spawn to open URL in default browser
+        const proc = Bun.spawn(
+          process.platform === "darwin"
+            ? ["open", auth.verification_uri_complete]
+            : process.platform === "win32"
+              ? ["cmd", "/c", "start", auth.verification_uri_complete]
+              : ["xdg-open", auth.verification_uri_complete],
+          { stdout: "ignore", stderr: "ignore" },
+        );
+        await proc.exited;
+      } catch {
+        // Ignore browser open failures
+      }
+    }
+
+    let interval = Math.max(auth.interval, 1);
+    let printedWait = false;
+
+    try {
+      while (true) {
+        const { status, data } = await requestDeviceToken(auth);
+        if (status === 200 && data.access_token) {
+          token = {
+            access_token: String(data.access_token),
+            refresh_token: String(data.refresh_token),
+            expires_at: Date.now() / 1000 + Number(data.expires_in),
+            scope: String(data.scope ?? ""),
+            token_type: String(data.token_type ?? "bearer"),
+          };
+          break;
+        }
+        const errorCode = String(data.error ?? "unknown_error");
+        if (errorCode === "expired_token") throw new OAuthDeviceExpired();
+        if (!printedWait) {
+          const desc = String(data.error_description ?? "");
+          yield {
+            type: "waiting",
+            message: `Waiting for user authorization...${desc ? ": " + desc.trim() : ""}`,
+            data: { error: errorCode, error_description: desc },
+          };
+          printedWait = true;
+        }
+        await new Promise((r) => setTimeout(r, interval * 1000));
+      }
+    } catch (err) {
+      if (err instanceof OAuthDeviceExpired) {
+        yield { type: "info", message: "Device code expired, restarting login..." };
+        continue; // Retry outer loop
+      }
+      yield { type: "error", message: `Login failed: ${err}` };
+      return;
+    }
+    break; // Got token, exit retry loop
+  }
+
+  if (!token) return;
+
+  // Save token
+  const oauthRef: OAuthRef = { storage: "file", key: KIMI_CODE_OAUTH_KEY };
+  await saveTokens(oauthRef, token);
+
+  // Fetch models
+  let models: ModelInfo[];
+  try {
+    models = await listModels(plat, token.access_token);
+  } catch (err) {
+    logger.error(`Failed to get models: ${err}`);
+    yield { type: "error", message: `Failed to get models: ${err}` };
+    return;
+  }
+
+  if (!models.length) {
+    yield { type: "error", message: "No models available for the selected platform." };
+    return;
+  }
+
+  const selection = selectDefaultModelAndThinking(models);
+  if (!selection) return;
+
+  applyKimiCodeConfig(config, {
+    models,
+    selectedModel: selection.model,
+    thinking: selection.thinking,
+    oauthRef,
+  });
+  await saveConfig(config);
+  yield { type: "success", message: "Logged in successfully." };
+}
+
+/**
+ * Logout from Kimi Code — delete tokens and clean up config.
+ * Corresponds to Python logout_kimi_code().
+ */
+export async function* logoutKimiCode(config: Config): AsyncGenerator<OAuthEvent> {
+  // Delete stored tokens (both keyring and file)
+  await deleteTokens({ storage: "keyring", key: KIMI_CODE_OAUTH_KEY });
+  await deleteTokens({ storage: "file", key: KIMI_CODE_OAUTH_KEY });
+
+  const providerKey = managedProviderKey(KIMI_CODE_PLATFORM_ID);
+  if (config.providers[providerKey]) {
+    delete config.providers[providerKey];
+  }
+
+  let removedDefault = false;
+  for (const [key, model] of Object.entries(config.models)) {
+    if (model.provider !== providerKey) continue;
+    delete config.models[key];
+    if (config.default_model === key) removedDefault = true;
+  }
+  if (removedDefault) config.default_model = "";
+
+  if (config.services) {
+    (config.services as any).moonshot_search = undefined;
+    (config.services as any).moonshot_fetch = undefined;
+  }
+
+  await saveConfig(config);
+  yield { type: "success", message: "Logged out successfully." };
 }
 
 // ── OAuthManager ────────────────────────────────────────
@@ -256,5 +512,49 @@ export class OAuthManager {
         }
       }
     }
+  }
+
+  /**
+   * Background refresh loop — corresponds to Python OAuthManager.refreshing().
+   * Periodically calls ensureFresh() until the returned abort function is called.
+   * Returns an AbortController; call abort() to stop the background loop.
+   */
+  refreshing(): AbortController {
+    const controller = new AbortController();
+    const signal = controller.signal;
+
+    const run = async () => {
+      // Initial ensure fresh
+      try {
+        await this.ensureFresh();
+      } catch (err) {
+        logger.warn(`Failed initial OAuth token refresh: ${err}`);
+      }
+
+      while (!signal.aborted) {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, REFRESH_INTERVAL_SECONDS * 1000);
+            signal.addEventListener("abort", () => {
+              clearTimeout(timer);
+              reject(new Error("aborted"));
+            }, { once: true });
+          });
+        } catch {
+          break; // Aborted
+        }
+
+        try {
+          await this.ensureFresh();
+        } catch (err) {
+          logger.warn(`Failed to refresh OAuth token in background: ${err}`);
+        }
+      }
+    };
+
+    // Fire-and-forget background loop
+    run().catch(() => {});
+
+    return controller;
   }
 }

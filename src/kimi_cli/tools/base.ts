@@ -3,8 +3,7 @@
  * Corresponds to Python's CallableTool2.
  */
 
-import type { z } from "zod/v4";
-import { zodToJsonSchema } from "zod-to-json-schema";
+import { z } from "zod/v4";
 import type { ToolContext, ToolDefinition, ToolResult } from "./types.ts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -24,10 +23,7 @@ export abstract class CallableTool<TParams extends z.ZodType<any, any> = z.ZodTy
     return {
       name: this.name,
       description: this.description,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      parameters: zodToJsonSchema(this.schema as any, {
-        target: "openAi",
-      }) as Record<string, unknown>,
+      parameters: z.toJSONSchema(this.schema) as Record<string, unknown>,
     };
   }
 }

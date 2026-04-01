@@ -530,10 +530,10 @@ class OpenAICompatibleProvider implements LLMProvider {
 
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed || trimmed === "data: [DONE]") continue;
-          if (!trimmed.startsWith("data: ")) continue;
-
-          const jsonStr = trimmed.slice(6);
+          if (!trimmed || trimmed === "data: [DONE]" || trimmed === "data:[DONE]") continue;
+          // Support both "data: {...}" and "data:{...}" (Kimi API omits the space)
+          if (!trimmed.startsWith("data:")) continue;
+          const jsonStr = trimmed.startsWith("data: ") ? trimmed.slice(6) : trimmed.slice(5);
           let data: any;
           try {
             data = JSON.parse(jsonStr);

@@ -15,7 +15,18 @@ export const OAuthRef = z.object({
 });
 export type OAuthRef = z.infer<typeof OAuthRef>;
 
-export const ProviderType = z.enum(["kimi", "openai", "anthropic", "gemini"]);
+export const ProviderType = z.enum([
+  "kimi",
+  "openai_legacy",
+  "openai_responses",
+  "anthropic",
+  "google_genai",
+  "gemini",
+  "vertexai",
+  "_echo",
+  "_scripted_echo",
+  "_chaos",
+]);
 export type ProviderType = z.infer<typeof ProviderType>;
 
 export const LLMProvider = z.object({
@@ -160,21 +171,46 @@ export interface ConfigMeta {
 
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { ConfigError } from "./exception.ts";
+
+export { ConfigError };
 
 export function getShareDir(): string {
-  return join(homedir(), ".kimi");
+  return process.env.KIMI_SHARE_DIR ?? join(homedir(), ".kimi");
 }
 
 export function getConfigFile(): string {
   return join(getShareDir(), "config.toml");
 }
 
-// ── Load / Save ─────────────────────────────────────────
+// ── Secret masking helper ────────────────────────────────
 
-export class ConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ConfigError";
+/** Mask a secret string for safe logging (shows first 4 chars + ***). */
+export function maskSecret(value: string): string {
+  if (!value || value.length <= 4) return "***";
+  return value.slice(0, 4) + "***";
+}
+
+// ── JSON → TOML migration ───────────────────────────────
+
+async function migrateJsonConfigToToml(): Promise<void> {
+  const oldJsonConfigFile = join(getShareDir(), "config.json");
+  const newTomlConfigFile = join(getShareDir(), "config.toml");
+
+  const oldFile = Bun.file(oldJsonConfigFile);
+  const newFile = Bun.file(newTomlConfigFile);
+  if (!(await oldFile.exists())) return;
+  if (await newFile.exists()) return;
+
+  try {
+    const data = await oldFile.json();
+    const config = Config.parse(data);
+    await saveConfig(config, newTomlConfigFile);
+    // Backup old file
+    const backupPath = oldJsonConfigFile.replace(/\.json$/, ".json.bak");
+    await Bun.$`mv ${oldJsonConfigFile} ${backupPath}`.quiet();
+  } catch (err) {
+    // If migration fails, continue with default config
   }
 }
 
@@ -189,6 +225,14 @@ export async function loadConfig(
   const resolvedPath = configFile ? resolve(configFile) : defaultConfigFile;
   const isDefault = resolvedPath === defaultConfigFile;
 
+  // If using default config and it doesn't exist, try migrating from JSON
+  if (isDefault) {
+    const file = Bun.file(resolvedPath);
+    if (!(await file.exists())) {
+      await migrateJsonConfigToToml();
+    }
+  }
+
   const file = Bun.file(resolvedPath);
   if (!(await file.exists())) {
     const config = getDefaultConfig();
@@ -198,9 +242,14 @@ export async function loadConfig(
 
   try {
     const text = await file.text();
-    const rawData = TOML.parse(text);
-    // @iarna/toml adds Symbol properties that break Zod validation — strip them via JSON roundtrip
-    const data = JSON.parse(JSON.stringify(rawData));
+    let data: unknown;
+    if (resolvedPath.toLowerCase().endsWith(".json")) {
+      data = JSON.parse(text);
+    } else {
+      const rawData = TOML.parse(text);
+      // @iarna/toml adds Symbol properties that break Zod validation — strip them via JSON roundtrip
+      data = JSON.parse(JSON.stringify(rawData));
+    }
     const config = Config.parse(data);
 
     // Environment variable overrides
@@ -242,8 +291,13 @@ export async function saveConfig(config: Config, configFile?: string): Promise<v
   const dir = filePath.substring(0, filePath.lastIndexOf("/"));
   await Bun.$`mkdir -p ${dir}`.quiet();
 
-  // Strip undefined/null values for clean TOML output
+  // Strip undefined/null values for clean output
   const data = JSON.parse(JSON.stringify(config));
-  const tomlStr = TOML.stringify(data as any);
-  await Bun.write(filePath, tomlStr);
+
+  if (filePath.toLowerCase().endsWith(".json")) {
+    await Bun.write(filePath, JSON.stringify(data, null, 2));
+  } else {
+    const tomlStr = TOML.stringify(data as any);
+    await Bun.write(filePath, tomlStr);
+  }
 }

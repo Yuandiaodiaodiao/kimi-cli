@@ -10,6 +10,7 @@ import { ToolError, ToolResultBuilder } from "../types.ts";
 
 const RG_TIMEOUT = 20_000; // 20 seconds in ms
 const RG_MAX_BUFFER = 20_000_000; // 20MB
+const RG_KILL_GRACE = 5_000; // 5 seconds: SIGTERM → SIGKILL
 
 const DESCRIPTION = `A powerful search tool based on ripgrep.
 
@@ -80,7 +81,11 @@ const ParamsSchema = z.object({
 
 type Params = z.infer<typeof ParamsSchema>;
 
-function buildRgArgs(params: Params, searchPath: string): string[] {
+function buildRgArgs(
+  params: Params,
+  searchPath: string,
+  opts?: { singleThreaded?: boolean },
+): string[] {
   const args: string[] = ["rg"];
 
   // Fixed args
@@ -90,6 +95,10 @@ function buildRgArgs(params: Params, searchPath: string): string[] {
   args.push("--hidden");
   for (const vcsDir of [".git", ".svn", ".hg", ".bzr", ".jj", ".sl"]) {
     args.push("--glob", `!${vcsDir}`);
+  }
+
+  if (opts?.singleThreaded) {
+    args.push("-j", "1");
   }
 
   // Search options
@@ -129,12 +138,37 @@ function stripPathPrefix(output: string, searchBase: string): string {
     .join("\n");
 }
 
+function isEagain(stderr: string): boolean {
+  return stderr.includes("os error 11") || stderr.includes("Resource temporarily unavailable");
+}
+
+/** Two-phase kill: SIGTERM → grace period → SIGKILL. */
+async function killProcess(proc: ReturnType<typeof Bun.spawn>): Promise<void> {
+  proc.kill(); // SIGTERM
+  try {
+    await Promise.race([
+      proc.exited,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("kill_grace_timeout")), RG_KILL_GRACE),
+      ),
+    ]);
+  } catch {
+    // Grace period expired, send SIGKILL
+    proc.kill(9);
+    await proc.exited;
+  }
+}
+
 export class Grep extends CallableTool<typeof ParamsSchema> {
   readonly name = "Grep";
   readonly description = DESCRIPTION;
   readonly schema = ParamsSchema;
 
-  async execute(params: Params, ctx: ToolContext): Promise<ToolResult> {
+  async execute(
+    params: Params,
+    ctx: ToolContext,
+    opts?: { _retry?: boolean },
+  ): Promise<ToolResult> {
     try {
       const builder = new ToolResultBuilder();
       let message = "";
@@ -146,7 +180,9 @@ export class Grep extends CallableTool<typeof ParamsSchema> {
       }
       searchPath = searchPath.replace(/^~/, process.env.HOME || "");
 
-      const args = buildRgArgs(params, searchPath);
+      const args = buildRgArgs(params, searchPath, {
+        singleThreaded: opts?._retry,
+      });
 
       // Execute ripgrep using Bun.spawn
       const proc = Bun.spawn(args, {
@@ -178,7 +214,7 @@ export class Grep extends CallableTool<typeof ParamsSchema> {
         await proc.exited;
       } catch (e) {
         if (e instanceof Error && e.message === "timeout") {
-          proc.kill();
+          await killProcess(proc);
           timedOut = true;
           output = "";
           stderrStr = "";
@@ -210,6 +246,10 @@ export class Grep extends CallableTool<typeof ParamsSchema> {
 
       // rg exit codes: 0=matches found, 1=no matches, 2+=error
       if (!timedOut && proc.exitCode !== 0 && proc.exitCode !== 1) {
+        // EAGAIN: retry once with single-threaded mode
+        if (!opts?._retry && isEagain(stderrStr)) {
+          return this.execute(params, ctx, { _retry: true });
+        }
         return ToolError(`Failed to grep. Error: ${stderrStr}`);
       }
 
@@ -219,7 +259,6 @@ export class Grep extends CallableTool<typeof ParamsSchema> {
         const { stat } = await import("node:fs/promises");
         const info = await stat(searchBase);
         if (info.isFile()) {
-          // If searching a single file, strip its parent directory prefix
           searchBase = searchBase.replace(/\/[^/]+$/, "");
         }
       } catch {
@@ -234,7 +273,7 @@ export class Grep extends CallableTool<typeof ParamsSchema> {
       }
 
       // Sort files_with_matches by mtime (most recently modified first)
-      if (params.output_mode === "files_with_matches" && lines.length > 0) {
+      if (!timedOut && params.output_mode === "files_with_matches" && lines.length > 0) {
         const { stat: fsStat } = await import("node:fs/promises");
         const withMtime = await Promise.all(
           lines.map(async (filePath) => {

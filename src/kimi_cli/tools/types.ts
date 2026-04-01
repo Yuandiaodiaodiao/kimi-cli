@@ -205,3 +205,138 @@ export class ToolResultBuilder {
     };
   }
 }
+
+// ── ToolRejectedError ───────────────────────────────
+
+/**
+ * Thrown / returned when a tool call is rejected by the user.
+ * Corresponds to Python utils.ToolRejectedError.
+ */
+export class ToolRejectedError extends Error {
+  readonly isError = true as const;
+  readonly hasFeedback: boolean;
+  readonly brief: string;
+
+  constructor(opts?: {
+    message?: string;
+    brief?: string;
+    hasFeedback?: boolean;
+  }) {
+    super(
+      opts?.message ??
+        "The tool call is rejected by the user. " +
+          "Stop what you are doing and wait for the user to tell you how to proceed.",
+    );
+    this.name = "ToolRejectedError";
+    this.brief = opts?.brief ?? "Rejected by user";
+    this.hasFeedback = opts?.hasFeedback ?? false;
+  }
+
+  /** Convert to a ToolResult for returning from a tool handler. */
+  toToolResult(): ToolResult {
+    return {
+      isError: true,
+      output: "",
+      message: this.message,
+    };
+  }
+}
+
+// ── SkipThisTool ────────────────────────────────────
+
+/**
+ * Thrown when a tool decides to skip itself from the loading process.
+ * Corresponds to Python __init__.SkipThisTool.
+ */
+export class SkipThisTool extends Error {
+  constructor(reason?: string) {
+    super(reason ?? "Tool skipped");
+    this.name = "SkipThisTool";
+  }
+}
+
+// ── extractKeyArgument ──────────────────────────────
+
+/**
+ * Extract a key argument string from tool call JSON arguments.
+ * Used for logging / display summaries.
+ * Corresponds to Python __init__.extract_key_argument.
+ */
+export function extractKeyArgument(
+  jsonContent: string,
+  toolName: string,
+): string | null {
+  let args: Record<string, unknown>;
+  try {
+    args = JSON.parse(jsonContent);
+  } catch {
+    return null;
+  }
+  if (!args || typeof args !== "object") return null;
+
+  let keyArg = "";
+
+  switch (toolName) {
+    case "Agent":
+      if (!args.description) return null;
+      keyArg = String(args.description);
+      break;
+    case "SendDMail":
+    case "SetTodoList":
+      return null;
+    case "Think":
+      if (!args.thought) return null;
+      keyArg = String(args.thought);
+      break;
+    case "Shell":
+      if (!args.command) return null;
+      keyArg = String(args.command);
+      break;
+    case "TaskOutput":
+    case "TaskStop":
+      if (!args.task_id) return null;
+      keyArg = String(args.task_id);
+      break;
+    case "TaskList":
+      keyArg = args.active_only !== false ? "active" : "all";
+      break;
+    case "ReadFile":
+    case "ReadMediaFile":
+    case "WriteFile":
+    case "StrReplaceFile":
+      if (!args.path) return null;
+      keyArg = _normalizePath(String(args.path));
+      break;
+    case "Glob":
+    case "Grep":
+      if (!args.pattern) return null;
+      keyArg = String(args.pattern);
+      break;
+    case "SearchWeb":
+      if (!args.query) return null;
+      keyArg = String(args.query);
+      break;
+    case "FetchURL":
+      if (!args.url) return null;
+      keyArg = String(args.url);
+      break;
+    default:
+      keyArg = jsonContent;
+  }
+
+  return _shortenMiddle(keyArg, 50);
+}
+
+function _normalizePath(path: string): string {
+  const cwd = process.cwd();
+  if (path.startsWith(cwd)) {
+    path = path.slice(cwd.length).replace(/^[/\\]/, "");
+  }
+  return path;
+}
+
+function _shortenMiddle(s: string, width: number): string {
+  if (s.length <= width) return s;
+  const half = Math.floor((width - 3) / 2);
+  return s.slice(0, half) + "..." + s.slice(s.length - half);
+}

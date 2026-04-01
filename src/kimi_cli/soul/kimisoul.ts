@@ -7,12 +7,29 @@ import type { Message, ContentPart, ToolCall, TokenUsage, StatusSnapshot, SlashC
 import type { ToolResult } from "../tools/types.ts";
 import type { LLM, StreamChunk, ChatOptions } from "../llm.ts";
 import type { HookEngine } from "../hooks/engine.ts";
+import type { Config } from "../config.ts";
+import type { Session } from "../session.ts";
 import { Context } from "./context.ts";
 import { Agent, type Runtime } from "./agent.ts";
 import { KimiToolset } from "./toolset.ts";
 import { SlashCommandRegistry } from "./slash.ts";
 import { compactContext, shouldCompact } from "./compaction.ts";
-import { toolResultMessage } from "./message.ts";
+import { toolResultMessage, systemReminder } from "./message.ts";
+import type { DynamicInjection, DynamicInjectionProvider } from "./dynamic_injection.ts";
+import { normalizeHistory } from "./dynamic_injection.ts";
+import { PlanModeInjectionProvider } from "./dynamic_injections/plan_mode.ts";
+import { YoloModeInjectionProvider } from "./dynamic_injections/yolo_mode.ts";
+import { handleNew, handleSessions, handleTitle } from "../ui/shell/commands/session.ts";
+import { handleModel } from "../ui/shell/commands/model.ts";
+import { handleLogin, handleLogout, createLoginPanel } from "../ui/shell/commands/login.ts";
+import { handleHooks, handleMcp, handleDebug, handleChangelog } from "../ui/shell/commands/info.ts";
+import { handleExport, handleImport } from "../ui/shell/commands/export_import.ts";
+import { handleWeb, handleVis, handleReload, handleTask } from "../ui/shell/commands/misc.ts";
+import { handleUsage } from "../ui/shell/commands/usage.ts";
+import { handleFeedback } from "../ui/shell/commands/feedback.ts";
+import { handleEditor } from "../ui/shell/commands/editor.ts";
+import { handleInit } from "../ui/shell/commands/init.ts";
+import { handleAddDir } from "../ui/shell/commands/add_dir.ts";
 import { logger } from "../utils/logging.ts";
 
 // ── Errors ─────────────────────────────────────────
@@ -41,6 +58,7 @@ export interface SoulCallbacks {
   onCompactionBegin?: () => void;
   onCompactionEnd?: () => void;
   onError?: (error: Error) => void;
+  onNotification?: (title: string, body: string) => void;
 }
 
 // ── Retry helpers ───────────────────────────────────
@@ -89,39 +107,6 @@ async function withRetry<T>(
   throw lastError;
 }
 
-// ── History normalization ───────────────────────────
-
-/**
- * Merge adjacent messages of the same role.
- * Many LLM APIs reject consecutive user or assistant messages.
- */
-function normalizeHistory(messages: Message[]): Message[] {
-  if (messages.length === 0) return messages;
-
-  const result: Message[] = [];
-  for (const msg of messages) {
-    const prev = result[result.length - 1];
-    if (prev && prev.role === msg.role && prev.role === "user") {
-      // Merge into previous user message
-      const prevText = typeof prev.content === "string" ? prev.content : prev.content.map(p => p.type === "text" ? p.text : "").join("\n");
-      const curText = typeof msg.content === "string" ? msg.content : msg.content.map(p => p.type === "text" ? p.text : "").join("\n");
-
-      // Check if current has tool_result parts — those must stay separate
-      const curParts = typeof msg.content === "string" ? [] : msg.content;
-      const hasToolResult = curParts.some(p => p.type === "tool_result");
-      if (hasToolResult) {
-        result.push(msg);
-        continue;
-      }
-
-      prev.content = prevText + "\n\n" + curText;
-    } else {
-      result.push({ ...msg });
-    }
-  }
-  return result;
-}
-
 // ── KimiSoul ────────────────────────────────────────
 
 export class KimiSoul {
@@ -131,6 +116,9 @@ export class KimiSoul {
   private abortController: AbortController | null = null;
   private _isRunning = false;
   private _planMode = false;
+  private _planSessionId: string | null = null;
+  private _pendingPlanActivationInjection = false;
+  private _injectionProviders: DynamicInjectionProvider[];
   private _stepCount = 0;
   private _totalUsage: TokenUsage = {
     inputTokens: 0,
@@ -149,9 +137,38 @@ export class KimiSoul {
     this.agent = opts.agent;
     this.context = opts.context;
     this.callbacks = opts.callbacks ?? {};
+
+    // Restore plan mode from session state
+    this._planMode = opts.agent.runtime.session.state.plan_mode ?? false;
+    this._planSessionId = opts.agent.runtime.session.state.plan_session_id ?? null;
+    if (this._planMode) {
+      this._ensurePlanSessionId();
+    }
+
+    // Initialize dynamic injection providers
+    this._injectionProviders = [
+      new PlanModeInjectionProvider(),
+      new YoloModeInjectionProvider(),
+    ];
   }
 
   // ── Properties ───────────────────────────────────
+
+  get runtime(): Runtime {
+    return this.agent.runtime;
+  }
+
+  get config(): Config {
+    return this.agent.runtime.config;
+  }
+
+  get session(): Session {
+    return this.agent.runtime.session;
+  }
+
+  get ctx(): Context {
+    return this.context;
+  }
 
   get name(): string {
     return this.agent.name;
@@ -199,20 +216,102 @@ export class KimiSoul {
     return this.agent.runtime.hookEngine;
   }
 
+  /** Push a notification to the UI (appears in message list). */
+  notify(title: string, body: string): void {
+    this.callbacks.onNotification?.(title, body);
+  }
+
   get availableSlashCommands(): SlashCommand[] {
     return this.agent.slashCommands.list();
   }
 
   // ── Plan mode ────────────────────────────────────
 
-  togglePlanMode(): void {
-    this._planMode = !this._planMode;
-    this.callbacks.onStatusUpdate?.({ planMode: this._planMode });
+  /** Toggle plan mode from a tool call. Returns the new state. */
+  async togglePlanMode(): Promise<boolean> {
+    return this._setPlanMode(!this._planMode, "tool");
+  }
+
+  /** Toggle plan mode from a manual entry point (slash command, keybinding). */
+  async togglePlanModeFromManual(): Promise<boolean> {
+    return this._setPlanMode(!this._planMode, "manual");
+  }
+
+  /** Set plan mode to a specific state from manual entry points. */
+  async setPlanModeFromManual(enabled: boolean): Promise<boolean> {
+    return this._setPlanMode(enabled, "manual");
   }
 
   setPlanMode(on: boolean): void {
-    this._planMode = on;
+    this._setPlanMode(on, "tool");
+  }
+
+  private _setPlanMode(enabled: boolean, source: "manual" | "tool"): boolean {
+    if (enabled === this._planMode) return this._planMode;
+    this._planMode = enabled;
+    if (enabled) {
+      this._ensurePlanSessionId();
+      this._pendingPlanActivationInjection = source === "manual";
+    } else {
+      this._pendingPlanActivationInjection = false;
+      this._planSessionId = null;
+      this.agent.runtime.session.state.plan_session_id = null;
+    }
+    // Persist to session state
+    this.agent.runtime.session.state.plan_mode = this._planMode;
     this.callbacks.onStatusUpdate?.({ planMode: this._planMode });
+    return this._planMode;
+  }
+
+  private _ensurePlanSessionId(): void {
+    if (this._planSessionId == null) {
+      this._planSessionId = crypto.randomUUID().replace(/-/g, "");
+      this.agent.runtime.session.state.plan_session_id = this._planSessionId;
+    }
+  }
+
+  /** Get the plan file path for the current session. */
+  getPlanFilePath(): string | null {
+    if (this._planSessionId == null) return null;
+    const workDir = this.agent.runtime.session.workDir;
+    return `${workDir}/.kimi/plans/${this._planSessionId}.md`;
+  }
+
+  /** Read the current plan file content. */
+  readCurrentPlan(): string | null {
+    const path = this.getPlanFilePath();
+    if (!path) return null;
+    try {
+      const file = Bun.file(path);
+      // Synchronous existence check is not available — use a simple approach
+      return file.size > 0 ? null : null; // Will be refined when plan tools exist
+    } catch {
+      return null;
+    }
+  }
+
+  /** Delete the current plan file. */
+  clearCurrentPlan(): void {
+    const path = this.getPlanFilePath();
+    if (!path) return;
+    try {
+      const { unlinkSync } = require("node:fs");
+      unlinkSync(path);
+    } catch {
+      // File may not exist
+    }
+  }
+
+  /** Consume the next-step activation reminder scheduled by a manual toggle. */
+  consumePendingPlanActivationInjection(): boolean {
+    if (!this._planMode || !this._pendingPlanActivationInjection) return false;
+    this._pendingPlanActivationInjection = false;
+    return true;
+  }
+
+  /** Register an additional dynamic injection provider. */
+  addInjectionProvider(provider: DynamicInjectionProvider): void {
+    this._injectionProviders.push(provider);
   }
 
   // ── Yolo mode ────────────────────────────────────
@@ -241,7 +340,9 @@ export class KimiSoul {
 
     try {
       this.callbacks.onTurnBegin?.(userInput);
+      this._wireLog({ type: "turn_begin", user_input: typeof userInput === "string" ? userInput : "[complex]" });
       await this._turn(userInput);
+      this._wireLog({ type: "turn_end" });
       this.callbacks.onTurnEnd?.();
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
@@ -402,13 +503,16 @@ export class KimiSoul {
     // Build messages for LLM — normalize to merge adjacent user messages
     const rawMessages = [...this.context.history] as Message[];
 
-    // Collect dynamic injections (plan mode reminder, yolo mode, etc.)
-    const injections = this._collectDynamicInjections();
+    // Collect dynamic injections from providers (plan mode, yolo mode, etc.)
+    const injections = await this._collectInjections();
     if (injections.length > 0) {
-      // Add as the last user message (system reminder)
+      // Add as the last user message wrapped in system-reminder tags
+      const injectionContent = injections
+        .map((inj) => `<system-reminder>\n${inj.content}\n</system-reminder>`)
+        .join("\n\n");
       rawMessages.push({
         role: "user",
-        content: injections.join("\n\n"),
+        content: injectionContent,
       });
     }
 
@@ -503,6 +607,14 @@ export class KimiSoul {
       await this.context.updateTokenCount(usage);
     }
 
+    // Wire log step results
+    if (assistantText) {
+      this._wireLog({ type: "text_part", text: assistantText });
+    }
+    for (const tc of toolCalls) {
+      this._wireLog({ type: "tool_call", name: tc.name, id: tc.id });
+    }
+
     // Send status update
     this.callbacks.onStatusUpdate?.(this.status);
 
@@ -511,28 +623,17 @@ export class KimiSoul {
 
   // ── Dynamic injections ──────────────────────────
 
-  private _collectDynamicInjections(): string[] {
-    const injections: string[] = [];
-
-    if (this._planMode) {
-      injections.push(
-        "<system-reminder>\n" +
-          "Plan mode is active. You MUST NOT make any edits or run any non-readonly tools. " +
-          "Focus on exploring the codebase and designing an implementation approach.\n" +
-          "</system-reminder>",
-      );
+  /** Collect dynamic injections from all registered providers. */
+  private async _collectInjections(): Promise<DynamicInjection[]> {
+    const injections: DynamicInjection[] = [];
+    for (const provider of this._injectionProviders) {
+      try {
+        const result = await provider.getInjections(this.context.history, this);
+        injections.push(...result);
+      } catch (err) {
+        logger.warn(`Injection provider failed: ${err}`);
+      }
     }
-
-    // Yolo mode injection — tell the LLM that all tools are auto-approved
-    if (this.isYolo && this._stepCount <= 1) {
-      injections.push(
-        "<system-reminder>\n" +
-          "All tool calls are auto-approved (YOLO mode is ON). " +
-          "You do not need to ask for permission or confirmation before running tools.\n" +
-          "</system-reminder>",
-      );
-    }
-
     return injections;
   }
 
@@ -571,8 +672,10 @@ export class KimiSoul {
     const clearCmd = registry.get("clear");
     if (clearCmd) {
       clearCmd.handler = async () => {
-        await this.context.compact();
+        await this.context.clear();
+        await this.context.writeSystemPrompt(this.agent.systemPrompt);
         logger.info("Context cleared");
+        this.callbacks.onStatusUpdate?.(this.status);
       };
     }
 
@@ -580,9 +683,15 @@ export class KimiSoul {
     const compactCmd = registry.get("compact");
     if (compactCmd) {
       compactCmd.handler = async (args: string) => {
+        if (this.context.nCheckpoints === 0) {
+          logger.info("The context is empty.");
+          return;
+        }
         const llm = this.agent.runtime.llm;
         if (!llm) return;
+        logger.info("Running `/compact`");
         await compactContext(this.context, llm, { focus: args || undefined });
+        this.callbacks.onStatusUpdate?.(this.status);
       };
     }
 
@@ -590,20 +699,244 @@ export class KimiSoul {
     const yoloCmd = registry.get("yolo");
     if (yoloCmd) {
       yoloCmd.handler = async () => {
-        const newYolo = !this.isYolo;
-        this.setYolo(newYolo);
-        logger.info(`YOLO mode: ${newYolo ? "ON" : "OFF"}`);
+        if (this.agent.runtime.approval.isYolo()) {
+          this.agent.runtime.approval.setYolo(false);
+          logger.info("YOLO mode: OFF");
+        } else {
+          this.agent.runtime.approval.setYolo(true);
+          logger.info("YOLO mode: ON");
+        }
       };
     }
 
-    // Wire /plan
+    // Wire /plan with subcmd support (on/off/view/clear/toggle)
     const planCmd = registry.get("plan");
     if (planCmd) {
       planCmd.handler = async (args: string) => {
-        if (args === "on") this.setPlanMode(true);
-        else if (args === "off") this.setPlanMode(false);
-        else this.togglePlanMode();
-        logger.info(`Plan mode: ${this._planMode ? "ON" : "OFF"}`);
+        const subcmd = args.trim().toLowerCase();
+        if (subcmd === "on") {
+          if (!this._planMode) await this.togglePlanModeFromManual();
+          const planPath = this.getPlanFilePath();
+          logger.info(`Plan mode ON. Plan file: ${planPath}`);
+          this.callbacks.onStatusUpdate?.({ planMode: this._planMode });
+        } else if (subcmd === "off") {
+          if (this._planMode) await this.togglePlanModeFromManual();
+          logger.info("Plan mode OFF. All tools are now available.");
+          this.callbacks.onStatusUpdate?.({ planMode: this._planMode });
+        } else if (subcmd === "view") {
+          const content = this.readCurrentPlan();
+          if (content) {
+            logger.info(content);
+          } else {
+            logger.info("No plan file found for this session.");
+          }
+        } else if (subcmd === "clear") {
+          this.clearCurrentPlan();
+          logger.info("Plan cleared.");
+        } else {
+          // Default: toggle
+          const newState = await this.togglePlanModeFromManual();
+          if (newState) {
+            const planPath = this.getPlanFilePath();
+            logger.info(`Plan mode ON. Write your plan to: ${planPath}`);
+          } else {
+            logger.info("Plan mode OFF. All tools are now available.");
+          }
+          this.callbacks.onStatusUpdate?.({ planMode: this._planMode });
+        }
+      };
+    }
+
+    // Wire /model
+    const modelCmd = registry.get("model");
+    if (modelCmd) {
+      modelCmd.handler = async () => {
+        await handleModel(this.agent.runtime.config, { isFromDefaultLocation: true, sourceFile: null });
+      };
+    }
+
+    // Wire /export
+    const exportCmd = registry.get("export");
+    if (exportCmd) {
+      exportCmd.handler = async (args: string) => {
+        await handleExport(this.context, this.agent.runtime.session, args);
+      };
+    }
+
+    // Wire /import
+    const importCmd = registry.get("import");
+    if (importCmd) {
+      importCmd.handler = async (args: string) => {
+        await handleImport(this.context, this.agent.runtime.session, args);
+      };
+    }
+
+    // Wire /web
+    const webCmd = registry.get("web");
+    if (webCmd) {
+      webCmd.handler = async () => {
+        handleWeb(this.agent.runtime.session.id);
+      };
+    }
+
+    // Wire /vis
+    const visCmd = registry.get("vis");
+    if (visCmd) {
+      visCmd.handler = async () => {
+        handleVis(this.agent.runtime.session.id);
+      };
+    }
+
+    // Wire /reload
+    const reloadCmd = registry.get("reload");
+    if (reloadCmd) {
+      reloadCmd.handler = async () => {
+        handleReload();
+      };
+    }
+
+    // Wire /task
+    const taskCmd = registry.get("task");
+    if (taskCmd) {
+      taskCmd.handler = async () => {
+        handleTask();
+      };
+    }
+
+    // Wire /login
+    const loginCmd = registry.get("login");
+    if (loginCmd) {
+      const notify = (t: string, b: string) => this.notify(t, b);
+      loginCmd.handler = async () => {
+        await handleLogin(this.agent.runtime.config, notify);
+      };
+      loginCmd.panel = () => createLoginPanel(this.agent.runtime.config, notify);
+    }
+
+    // Wire /logout
+    const logoutCmd = registry.get("logout");
+    if (logoutCmd) {
+      logoutCmd.handler = async () => {
+        await handleLogout(this.agent.runtime.config, (t, b) => this.notify(t, b));
+      };
+    }
+
+    // Wire /usage
+    const usageCmd = registry.get("usage");
+    if (usageCmd) {
+      usageCmd.handler = async () => {
+        await handleUsage(this.agent.runtime.config, this.agent.runtime.config.default_model || undefined);
+      };
+    }
+
+    // Wire /feedback
+    const feedbackCmd = registry.get("feedback");
+    if (feedbackCmd) {
+      feedbackCmd.handler = async (args: string) => {
+        await handleFeedback(
+          this.agent.runtime.config,
+          args,
+          this.agent.runtime.session.id,
+          this.agent.runtime.config.default_model || undefined,
+        );
+      };
+    }
+
+    // Wire /editor
+    const editorCmd = registry.get("editor");
+    if (editorCmd) {
+      editorCmd.handler = async (args: string) => {
+        await handleEditor(this.agent.runtime.config, { isFromDefaultLocation: true, sourceFile: null }, args);
+      };
+    }
+
+    // Wire /hooks
+    const hooksCmd = registry.get("hooks");
+    if (hooksCmd) {
+      hooksCmd.handler = async () => {
+        handleHooks(this.agent.runtime.hookEngine);
+      };
+    }
+
+    // Wire /mcp
+    const mcpCmd = registry.get("mcp");
+    if (mcpCmd) {
+      mcpCmd.handler = async () => {
+        handleMcp(this.agent.runtime.config);
+      };
+    }
+
+    // Wire /debug
+    const debugCmd = registry.get("debug");
+    if (debugCmd) {
+      debugCmd.handler = async () => {
+        handleDebug(this.context);
+      };
+    }
+
+    // Wire /changelog
+    const changelogCmd = registry.get("changelog");
+    if (changelogCmd) {
+      changelogCmd.handler = async () => {
+        handleChangelog();
+      };
+    }
+
+    // Wire /new
+    const newCmd = registry.get("new");
+    if (newCmd) {
+      newCmd.handler = async () => {
+        await handleNew(this.agent.runtime.session);
+      };
+    }
+
+    // Wire /sessions
+    const sessionsCmd = registry.get("sessions");
+    if (sessionsCmd) {
+      sessionsCmd.handler = async () => {
+        await handleSessions(this.agent.runtime.session);
+      };
+    }
+
+    // Wire /title
+    const titleCmd = registry.get("title");
+    if (titleCmd) {
+      titleCmd.handler = async (args: string) => {
+        await handleTitle(this.agent.runtime.session, args);
+      };
+    }
+
+    // Wire /init
+    const initCmd = registry.get("init");
+    if (initCmd) {
+      initCmd.handler = async () => {
+        const result = await handleInit(this.agent.runtime.session.workDir);
+        if (result) {
+          // Inject the generated AGENTS.md into context so the LLM knows about it
+          await this.context.appendMessage({
+            role: "user",
+            content: `The user ran /init. Generated AGENTS.md:\n${result}`,
+          });
+        }
+      };
+    }
+
+    // Wire /add-dir
+    const addDirCmd = registry.get("add-dir");
+    if (addDirCmd) {
+      addDirCmd.handler = async (args: string) => {
+        const result = await handleAddDir(
+          this.agent.runtime.session,
+          this.agent.runtime.session.workDir,
+          args,
+        );
+        if (result) {
+          // Inject directory info into context so the LLM knows about it
+          await this.context.appendMessage({
+            role: "user",
+            content: result,
+          });
+        }
       };
     }
   }
@@ -613,5 +946,25 @@ export class KimiSoul {
     const ctx = this.agent.toolset.context;
     ctx.setPlanMode = (on: boolean) => this.setPlanMode(on);
     ctx.getPlanMode = () => this._planMode;
+    ctx.getPlanFilePath = () => this.getPlanFilePath();
+    ctx.togglePlanMode = () => this.togglePlanMode();
+  }
+
+  // ── Wire file logging ────────────────────────────
+
+  /**
+   * Append a wire event to the session's wire.jsonl file.
+   * Used for session title generation and debugging.
+   */
+  private async _wireLog(event: Record<string, unknown>): Promise<void> {
+    const wireFile = this.agent.runtime.session.wireFile;
+    if (!wireFile) return;
+    try {
+      const { appendFile } = await import("node:fs/promises");
+      const line = JSON.stringify({ ...event, ts: Date.now() }) + "\n";
+      await appendFile(wireFile, line, "utf-8");
+    } catch {
+      // Wire logging is best-effort — don't crash on failure
+    }
   }
 }

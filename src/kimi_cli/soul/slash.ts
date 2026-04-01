@@ -58,6 +58,7 @@ export function createDefaultRegistry(): SlashCommandRegistry {
     {
       name: "clear",
       description: "Clear conversation history",
+      aliases: ["reset"],
       handler: async () => {
         /* wired by app */
       },
@@ -97,6 +98,102 @@ export function createDefaultRegistry(): SlashCommandRegistry {
     {
       name: "add-dir",
       description: "Add directory to workspace scope",
+      handler: async () => {},
+    },
+    // ── Commands below are newly registered to match Python version ──
+    {
+      name: "login",
+      description: "Login or setup a platform",
+      aliases: ["setup"],
+      handler: async () => {},
+    },
+    {
+      name: "logout",
+      description: "Logout from the current platform",
+      handler: async () => {},
+    },
+    {
+      name: "new",
+      description: "Start a new session",
+      handler: async () => {},
+    },
+    {
+      name: "sessions",
+      description: "List sessions and resume",
+      aliases: ["resume"],
+      handler: async () => {},
+    },
+    {
+      name: "title",
+      description: "Set or show the session title",
+      aliases: ["rename"],
+      handler: async () => {},
+    },
+    {
+      name: "task",
+      description: "Browse and manage background tasks",
+      handler: async () => {},
+    },
+    {
+      name: "editor",
+      description: "Set default external editor",
+      handler: async () => {},
+    },
+    {
+      name: "reload",
+      description: "Reload configuration",
+      handler: async () => {},
+    },
+    {
+      name: "usage",
+      description: "Display API usage and quota information",
+      aliases: ["status"],
+      handler: async () => {},
+    },
+    {
+      name: "changelog",
+      description: "Show release notes",
+      aliases: ["release-notes"],
+      handler: async () => {},
+    },
+    {
+      name: "feedback",
+      description: "Submit feedback",
+      handler: async () => {},
+    },
+    {
+      name: "hooks",
+      description: "List configured hooks",
+      handler: async () => {},
+    },
+    {
+      name: "mcp",
+      description: "Show MCP servers and tools",
+      handler: async () => {},
+    },
+    {
+      name: "web",
+      description: "Open Kimi Code Web UI in browser",
+      handler: async () => {},
+    },
+    {
+      name: "vis",
+      description: "Open Kimi Agent Tracing Visualizer",
+      handler: async () => {},
+    },
+    {
+      name: "export",
+      description: "Export session context to markdown",
+      handler: async () => {},
+    },
+    {
+      name: "import",
+      description: "Import context from file or session",
+      handler: async () => {},
+    },
+    {
+      name: "debug",
+      description: "Debug the context",
       handler: async () => {},
     },
   ];

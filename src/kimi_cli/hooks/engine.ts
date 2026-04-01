@@ -3,7 +3,7 @@
  * Runs matching hooks (shell commands) in parallel on lifecycle events.
  */
 
-import type { HookDef, HookEventType } from "../config.ts";
+import type { HookDef, HookEventType } from "./config.ts";
 import { logger } from "../utils/logging.ts";
 
 // ── Types ───────────────────────────────────────────────
@@ -11,6 +11,9 @@ import { logger } from "../utils/logging.ts";
 export interface HookResult {
   action: "allow" | "block";
   reason: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
   timedOut?: boolean;
 }
 
@@ -23,6 +26,46 @@ export interface WireHookSubscription {
 
 export type OnTriggered = (event: string, target: string, hookCount: number) => void;
 export type OnResolved = (event: string, target: string, action: string, reason: string, durationMs: number) => void;
+export type OnWireHookRequest = (handle: WireHookHandle) => Promise<void>;
+
+// ── Wire hook handle ────────────────────────────────────
+
+let _handleIdCounter = 0;
+
+export class WireHookHandle {
+  readonly id: string;
+  readonly subscriptionId: string;
+  readonly event: string;
+  readonly target: string;
+  readonly inputData: Record<string, unknown>;
+
+  private _resolve?: (result: HookResult) => void;
+  private _promise: Promise<HookResult>;
+
+  constructor(opts: {
+    subscriptionId: string;
+    event: string;
+    target: string;
+    inputData: Record<string, unknown>;
+  }) {
+    this.id = `wh${(++_handleIdCounter).toString(36)}`;
+    this.subscriptionId = opts.subscriptionId;
+    this.event = opts.event;
+    this.target = opts.target;
+    this.inputData = opts.inputData;
+    this._promise = new Promise<HookResult>((resolve) => {
+      this._resolve = resolve;
+    });
+  }
+
+  wait(): Promise<HookResult> {
+    return this._promise;
+  }
+
+  resolve(action: "allow" | "block" = "allow", reason = ""): void {
+    this._resolve?.({ action, reason });
+  }
+}
 
 // ── Hook runner ─────────────────────────────────────────
 
@@ -45,20 +88,42 @@ async function runHook(
     const exitCode = await proc.exited;
     clearTimeout(timer);
 
-    if (exitCode === 0) {
-      const stdout = await new Response(proc.stdout).text();
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+
+    // Exit 2 = block
+    if (exitCode === 2) {
+      return {
+        action: "block",
+        reason: stderr.trim(),
+        stdout,
+        stderr,
+        exitCode: 2,
+      };
+    }
+
+    // Exit 0 + JSON stdout = structured decision
+    if (exitCode === 0 && stdout.trim()) {
       try {
         const parsed = JSON.parse(stdout.trim());
-        return {
-          action: parsed.action === "block" ? "block" : "allow",
-          reason: parsed.reason ?? "",
-        };
+        if (parsed && typeof parsed === "object") {
+          const hookOutput = parsed.hookSpecificOutput;
+          if (hookOutput?.permissionDecision === "deny") {
+            return {
+              action: "block",
+              reason: String(hookOutput.permissionDecisionReason ?? ""),
+              stdout,
+              stderr,
+              exitCode: 0,
+            };
+          }
+        }
       } catch {
-        return { action: "allow", reason: "" };
+        // Not JSON — that's fine
       }
     }
-    // Non-zero exit → fail open
-    return { action: "allow", reason: "" };
+
+    return { action: "allow", reason: "", stdout, stderr, exitCode: exitCode ?? 0 };
   } catch {
     return { action: "allow", reason: "" };
   }
@@ -72,6 +137,7 @@ export class HookEngine {
   private cwd?: string;
   private onTriggered?: OnTriggered;
   private onResolved?: OnResolved;
+  private onWireHook?: OnWireHookRequest;
   private byEvent = new Map<string, HookDef[]>();
   private wireByEvent = new Map<string, WireHookSubscription[]>();
 
@@ -80,11 +146,13 @@ export class HookEngine {
     cwd?: string;
     onTriggered?: OnTriggered;
     onResolved?: OnResolved;
+    onWireHook?: OnWireHookRequest;
   }) {
     this.hooks = opts?.hooks ? [...opts.hooks] : [];
     this.cwd = opts?.cwd;
     this.onTriggered = opts?.onTriggered;
     this.onResolved = opts?.onResolved;
+    this.onWireHook = opts?.onWireHook;
     this.rebuildIndex();
   }
 
@@ -113,9 +181,10 @@ export class HookEngine {
     this.rebuildIndex();
   }
 
-  setCallbacks(opts: { onTriggered?: OnTriggered; onResolved?: OnResolved }): void {
+  setCallbacks(opts: { onTriggered?: OnTriggered; onResolved?: OnResolved; onWireHook?: OnWireHookRequest }): void {
     this.onTriggered = opts.onTriggered;
     this.onResolved = opts.onResolved;
+    this.onWireHook = opts.onWireHook;
   }
 
   get hasHooks(): boolean {
@@ -163,11 +232,18 @@ export class HookEngine {
       serverMatched.push(h);
     }
 
-    const total = serverMatched.length;
+    // Match wire subscriptions
+    const wireMatched: WireHookSubscription[] = [];
+    for (const s of this.wireByEvent.get(event) ?? []) {
+      if (!this.matchRegex(s.matcher, matcherValue)) continue;
+      wireMatched.push(s);
+    }
+
+    const total = serverMatched.length + wireMatched.length;
     if (total === 0) return [];
 
     try {
-      return await this.executeHooks(event, matcherValue, serverMatched, opts.inputData);
+      return await this.executeHooks(event, matcherValue, serverMatched, wireMatched, opts.inputData);
     } catch {
       logger.warn(`Hook engine error for ${event}, failing open`);
       return [];
@@ -178,9 +254,10 @@ export class HookEngine {
     event: string,
     matcherValue: string,
     serverMatched: HookDef[],
+    wireMatched: WireHookSubscription[],
     inputData: Record<string, unknown>,
   ): Promise<HookResult[]> {
-    const total = serverMatched.length;
+    const total = serverMatched.length + wireMatched.length;
 
     if (this.onTriggered) {
       try {
@@ -191,9 +268,16 @@ export class HookEngine {
     }
 
     const t0 = performance.now();
-    const tasks = serverMatched.map((h) =>
+
+    // Server-side: run shell commands
+    const tasks: Promise<HookResult>[] = serverMatched.map((h) =>
       runHook(h.command, inputData, { timeout: h.timeout, cwd: this.cwd }),
     );
+
+    // Wire-side: dispatch to client
+    for (const s of wireMatched) {
+      tasks.push(this.dispatchWireHook(s.id, event, matcherValue, inputData, s.timeout));
+    }
 
     const results = await Promise.all(tasks);
     const durationMs = Math.round(performance.now() - t0);
@@ -217,5 +301,41 @@ export class HookEngine {
     }
 
     return results;
+  }
+
+  private async dispatchWireHook(
+    subscriptionId: string,
+    event: string,
+    target: string,
+    inputData: Record<string, unknown>,
+    timeout: number = 30,
+  ): Promise<HookResult> {
+    if (!this.onWireHook) {
+      return { action: "allow", reason: "" };
+    }
+
+    const handle = new WireHookHandle({
+      subscriptionId,
+      event,
+      target,
+      inputData,
+    });
+
+    const hookPromise = this.onWireHook(handle);
+    hookPromise.catch(() => {}); // Suppress unhandled rejection
+
+    try {
+      const timeoutMs = timeout * 1000;
+      const result = await Promise.race([
+        handle.wait(),
+        new Promise<HookResult>((_, reject) =>
+          setTimeout(() => reject(new Error("timeout")), timeoutMs),
+        ),
+      ]);
+      return result;
+    } catch {
+      logger.warn(`Wire hook timed out: ${event} ${target}`);
+      return { action: "allow", reason: "", timedOut: true };
+    }
   }
 }

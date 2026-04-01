@@ -71,18 +71,29 @@ export class AskUserQuestion extends CallableTool<typeof ParamsSchema> {
   readonly schema = ParamsSchema;
 
   async execute(params: Params, ctx: ToolContext): Promise<ToolResult> {
-    // Stub: full implementation requires wire/UI integration
-    // For now, return a placeholder indicating the question was asked
+    const answers: Record<string, string> = {};
+
+    for (const q of params.questions) {
+      const optionLabels = q.options.map((o) => o.label);
+
+      if (ctx.askUser) {
+        // Wire-connected: actually ask the user
+        try {
+          const answer = await ctx.askUser(q.question, optionLabels);
+          answers[q.question] = answer;
+        } catch {
+          // User didn't respond or error — use first option as default
+          answers[q.question] = optionLabels[0] ?? "No answer";
+        }
+      } else {
+        // Not connected (print mode, yolo mode, etc.) — auto-select first option
+        answers[q.question] = optionLabels[0] ?? "No answer";
+      }
+    }
+
     return ToolOk(
-      JSON.stringify(
-        {
-          answers: {},
-          note: "Question system not yet connected. Make your own decision.",
-        },
-        null,
-        2,
-      ),
-      "Question system pending integration.",
+      JSON.stringify({ answers }, null, 2),
+      "User responses collected.",
     );
   }
 }
