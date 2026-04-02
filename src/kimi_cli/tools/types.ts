@@ -3,6 +3,7 @@
  */
 
 import type { ApprovalDecision, JsonValue } from "../types.ts";
+import type { Runtime } from "../soul/agent.ts";
 
 // ── ToolContext ──────────────────────────────────────────
 
@@ -35,6 +36,8 @@ export interface ToolContext {
     moonshotSearch?: { baseUrl: string; apiKey: string; customHeaders?: Record<string, string> };
     moonshotFetch?: { baseUrl: string; apiKey: string; customHeaders?: Record<string, string> };
   };
+  /** Runtime reference for tools that need full runtime access (e.g. Agent tool). */
+  runtime?: Runtime;
 }
 
 // ── ToolResult ──────────────────────────────────────────

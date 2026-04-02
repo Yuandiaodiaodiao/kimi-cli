@@ -34,12 +34,51 @@ import { logger } from "../utils/logging.ts";
 
 // ── Errors ─────────────────────────────────────────
 
+export class LLMNotSet extends Error {
+  constructor() {
+    super("LLM not set");
+    this.name = "LLMNotSet";
+  }
+}
+
+export class LLMNotSupported extends Error {
+  readonly modelName: string;
+  readonly capabilities: ModelCapability[];
+  constructor(modelName: string, capabilities: ModelCapability[]) {
+    const word = capabilities.length === 1 ? "capability" : "capabilities";
+    super(
+      `LLM model '${modelName}' does not support required ${word}: ${capabilities.join(", ")}`,
+    );
+    this.name = "LLMNotSupported";
+    this.modelName = modelName;
+    this.capabilities = capabilities;
+  }
+}
+
 export class MaxStepsReached extends Error {
   readonly maxSteps: number;
   constructor(maxSteps: number) {
     super(`Reached max steps per turn: ${maxSteps}`);
     this.name = "MaxStepsReached";
     this.maxSteps = maxSteps;
+  }
+}
+
+export class RunCancelled extends Error {
+  constructor() {
+    super("The run was cancelled");
+    this.name = "RunCancelled";
+  }
+}
+
+export class BackToTheFuture extends Error {
+  readonly checkpointId: number;
+  readonly messages: Message[];
+  constructor(checkpointId: number, messages: Message[]) {
+    super(`Reverting context to checkpoint ${checkpointId}`);
+    this.name = "BackToTheFuture";
+    this.checkpointId = checkpointId;
+    this.messages = messages;
   }
 }
 
@@ -966,5 +1005,240 @@ export class KimiSoul {
     } catch {
       // Wire logging is best-effort — don't crash on failure
     }
+  }
+}
+
+// ── FlowRunner ─────────────────────────────────────
+
+import type { Flow, FlowNode, FlowEdge } from "../skill/flow/index.ts";
+import { parseChoice } from "../skill/flow/index.ts";
+
+const DEFAULT_MAX_FLOW_MOVES = 1000;
+const FLOW_COMMAND_PREFIX = "flow:";
+
+interface FlowTurnResult {
+  /** Number of agent steps used in this turn. */
+  stepCount: number;
+  /** Why the turn stopped. */
+  stopReason: "no_tool_calls" | "tool_rejected";
+  /** The final assistant message text, if any. */
+  finalText: string | undefined;
+}
+
+/**
+ * Drives the agent through a Flow graph, executing task and decision nodes.
+ * Corresponds to Python `FlowRunner` in `soul/kimisoul.py`.
+ */
+export class FlowRunner {
+  private readonly _flow: Flow;
+  private readonly _name: string | undefined;
+  private readonly _maxMoves: number;
+
+  constructor(flow: Flow, opts?: { name?: string; maxMoves?: number }) {
+    this._flow = flow;
+    this._name = opts?.name;
+    this._maxMoves = opts?.maxMoves ?? DEFAULT_MAX_FLOW_MOVES;
+  }
+
+  /**
+   * Build a FlowRunner for the ralph (auto-repeat) loop pattern.
+   * The agent runs a task repeatedly until it chooses STOP.
+   */
+  static ralphLoop(
+    promptText: string,
+    maxRalphIterations: number,
+  ): FlowRunner {
+    const totalRuns =
+      maxRalphIterations < 0 ? 1_000_000_000_000_000 : maxRalphIterations + 1;
+
+    const nodes: Record<string, FlowNode> = {
+      BEGIN: { id: "BEGIN", label: "BEGIN", kind: "begin" },
+      END: { id: "END", label: "END", kind: "end" },
+      R1: { id: "R1", label: promptText, kind: "task" },
+      R2: {
+        id: "R2",
+        label:
+          `${promptText}. (You are running in an automated loop where the same ` +
+          "prompt is fed repeatedly. Only choose STOP when the task is fully complete. " +
+          "Including it will stop further iterations. If you are not 100% sure, " +
+          "choose CONTINUE.)",
+        kind: "decision",
+      },
+    };
+
+    const outgoing: Record<string, FlowEdge[]> = {
+      BEGIN: [{ src: "BEGIN", dst: "R1", label: undefined }],
+      R1: [{ src: "R1", dst: "R2", label: undefined }],
+      R2: [
+        { src: "R2", dst: "R2", label: "CONTINUE" },
+        { src: "R2", dst: "END", label: "STOP" },
+      ],
+      END: [],
+    };
+
+    const flow: Flow = { nodes, outgoing, beginId: "BEGIN", endId: "END" };
+    return new FlowRunner(flow, { maxMoves: totalRuns });
+  }
+
+  /** Execute the flow graph using the given KimiSoul. */
+  async run(soul: KimiSoul, args: string): Promise<void> {
+    if (args.trim()) {
+      const command = this._name
+        ? `/${FLOW_COMMAND_PREFIX}${this._name}`
+        : "/flow";
+      logger.warn(`Agent flow ${command} ignores args: ${args}`);
+      return;
+    }
+
+    let currentId = this._flow.beginId;
+    let moves = 0;
+    let totalSteps = 0;
+
+    while (true) {
+      const node = this._flow.nodes[currentId];
+      if (!node) {
+        logger.error(`Agent flow: unknown node "${currentId}"; stopping.`);
+        return;
+      }
+      const edges = this._flow.outgoing[currentId] ?? [];
+
+      if (node.kind === "end") {
+        logger.info(`Agent flow reached END node ${currentId}`);
+        return;
+      }
+
+      if (node.kind === "begin") {
+        if (edges.length === 0) {
+          logger.error(
+            `Agent flow BEGIN node "${node.id}" has no outgoing edges; stopping.`,
+          );
+          return;
+        }
+        currentId = edges[0]!.dst;
+        continue;
+      }
+
+      if (moves >= this._maxMoves) {
+        throw new MaxStepsReached(totalSteps);
+      }
+
+      const result = await this._executeFlowNode(soul, node, edges);
+      totalSteps += result.stepsUsed;
+      if (result.nextId === undefined) return;
+      moves++;
+      currentId = result.nextId;
+    }
+  }
+
+  private async _executeFlowNode(
+    soul: KimiSoul,
+    node: FlowNode,
+    edges: FlowEdge[],
+  ): Promise<{ nextId: string | undefined; stepsUsed: number }> {
+    if (edges.length === 0) {
+      logger.error(
+        `Agent flow node "${node.id}" has no outgoing edges; stopping.`,
+      );
+      return { nextId: undefined, stepsUsed: 0 };
+    }
+
+    const basePrompt = FlowRunner._buildFlowPrompt(node, edges);
+    let prompt = basePrompt;
+    let stepsUsed = 0;
+
+    while (true) {
+      const result = await FlowRunner._flowTurn(soul, prompt);
+      stepsUsed += result.stepCount;
+
+      if (result.stopReason === "tool_rejected") {
+        logger.error("Agent flow stopped after tool rejection.");
+        return { nextId: undefined, stepsUsed };
+      }
+
+      if (node.kind !== "decision") {
+        return { nextId: edges[0]!.dst, stepsUsed };
+      }
+
+      const choice = result.finalText
+        ? parseChoice(result.finalText)
+        : undefined;
+      const nextId = FlowRunner._matchFlowEdge(edges, choice);
+      if (nextId !== undefined) {
+        return { nextId, stepsUsed };
+      }
+
+      const options = edges.map((e) => e.label ?? "").join(", ");
+      logger.warn(
+        `Agent flow invalid choice. Got: ${choice ?? "<missing>"}. Available: ${options}.`,
+      );
+      prompt =
+        `${basePrompt}\n\n` +
+        "Your last response did not include a valid choice. " +
+        "Reply with one of the choices using <choice>...</choice>.";
+    }
+  }
+
+  private static _buildFlowPrompt(
+    node: FlowNode,
+    edges: FlowEdge[],
+  ): string {
+    if (node.kind !== "decision") {
+      return node.label;
+    }
+
+    const choices = edges.filter((e) => e.label).map((e) => e.label!);
+    const lines = [
+      node.label,
+      "",
+      "Available branches:",
+      ...choices.map((c) => `- ${c}`),
+      "",
+      "Reply with a choice using <choice>...</choice>.",
+    ];
+    return lines.join("\n");
+  }
+
+  private static _matchFlowEdge(
+    edges: FlowEdge[],
+    choice: string | undefined,
+  ): string | undefined {
+    if (!choice) return undefined;
+    for (const edge of edges) {
+      if (edge.label === choice) return edge.dst;
+    }
+    return undefined;
+  }
+
+  private static async _flowTurn(
+    soul: KimiSoul,
+    prompt: string,
+  ): Promise<FlowTurnResult> {
+    // TODO: Wire TurnBegin/TurnEnd events once wire_send is available
+    // For now, drive the soul's internal _turn method
+    const stepsBefore = soul["_stepCount"];
+    await soul["_turn"](prompt);
+    const stepsAfter = soul["_stepCount"];
+
+    // Extract final assistant text from context
+    const history = soul["context"].messages;
+    const lastMsg = history.length > 0 ? history[history.length - 1] : undefined;
+    let finalText: string | undefined;
+    if (lastMsg?.role === "assistant") {
+      finalText =
+        typeof lastMsg.content === "string"
+          ? lastMsg.content
+          : Array.isArray(lastMsg.content)
+            ? lastMsg.content
+                .filter((p): p is { type: "text"; text: string } => "type" in p && p.type === "text")
+                .map((p) => p.text)
+                .join(" ")
+            : undefined;
+    }
+
+    return {
+      stepCount: stepsAfter - stepsBefore,
+      stopReason: "no_tool_calls",
+      finalText,
+    };
   }
 }

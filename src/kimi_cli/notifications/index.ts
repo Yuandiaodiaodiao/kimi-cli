@@ -19,3 +19,5 @@ export type { NotificationConfig } from "./manager.ts";
 export { NotificationWatcher } from "./notifier.ts";
 export { toWireNotification } from "./wire.ts";
 export type { WireNotification } from "./wire.ts";
+export { buildNotificationMessage, extractNotificationIds, isNotificationMessage } from "./llm.ts";
+export type { NotificationRuntime, BackgroundTaskView } from "./llm.ts";

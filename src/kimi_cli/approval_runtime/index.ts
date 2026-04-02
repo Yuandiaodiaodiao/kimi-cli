@@ -4,7 +4,13 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { logger } from "../utils/logging.ts";
+import type { RootWireHub } from "../wire/root_hub.ts";
+import type {
+  ApprovalRequest as WireApprovalRequest,
+  ApprovalResponse as WireApprovalResponse,
+} from "../wire/types.ts";
 
 // ── Types ───────────────────────────────────────────────
 
@@ -49,6 +55,42 @@ export class ApprovalCancelledError extends Error {
   }
 }
 
+// ── Approval Source Context (ContextVar equivalent) ─────
+
+const _approvalSourceStorage = new AsyncLocalStorage<ApprovalSource | null>();
+
+export function getCurrentApprovalSourceOrNull(): ApprovalSource | null {
+  return _approvalSourceStorage.getStore() ?? null;
+}
+
+export function setCurrentApprovalSource(source: ApprovalSource): void {
+  // Note: AsyncLocalStorage manages context automatically via run().
+  // For imperative set/reset, we store on the current context.
+  const store = _approvalSourceStorage.getStore();
+  if (store !== undefined) {
+    // We're inside a run() context — callers should use runWithApprovalSource instead
+    logger.warn("setCurrentApprovalSource called inside existing context");
+  }
+}
+
+/**
+ * Run a callback with the given approval source set as the current context.
+ * Equivalent to Python's ContextVar set/reset pattern.
+ */
+export function runWithApprovalSource<T>(source: ApprovalSource, fn: () => T): T {
+  return _approvalSourceStorage.run(source, fn);
+}
+
+/**
+ * Run an async callback with the given approval source set as the current context.
+ */
+export async function runWithApprovalSourceAsync<T>(
+  source: ApprovalSource,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return _approvalSourceStorage.run(source, fn);
+}
+
 // ── Waiter (promise-based future) ───────────────────────
 
 interface Waiter {
@@ -75,6 +117,13 @@ export class ApprovalRuntime {
   private requests = new Map<string, ApprovalRequestRecord>();
   private waiters = new Map<string, Waiter>();
   private subscribers = new Map<string, EventSubscriber>();
+  private _rootWireHub: RootWireHub | null = null;
+
+  /** Bind a root wire hub for broadcasting approval events to UI. */
+  bindRootWireHub(rootWireHub: RootWireHub): void {
+    if (this._rootWireHub === rootWireHub) return;
+    this._rootWireHub = rootWireHub;
+  }
 
   createRequest(opts: {
     requestId?: string;
@@ -101,6 +150,7 @@ export class ApprovalRuntime {
     };
     this.requests.set(request.id, request);
     this.publishEvent({ kind: "request_created", request });
+    this._publishWireRequest(request);
     return request;
   }
 
@@ -138,6 +188,7 @@ export class ApprovalRuntime {
       this.waiters.delete(requestId);
     }
     this.publishEvent({ kind: "request_resolved", request });
+    this._publishWireResponse(requestId, response, feedback);
     return true;
   }
 
@@ -157,6 +208,7 @@ export class ApprovalRuntime {
         this.waiters.delete(requestId);
       }
       this.publishEvent({ kind: "request_resolved", request });
+      this._publishWireResponse(requestId, "reject");
       cancelled++;
     }
     return cancelled;
@@ -190,5 +242,35 @@ export class ApprovalRuntime {
         logger.error("Approval runtime event subscriber failed", err);
       }
     }
+  }
+
+  private _publishWireRequest(request: ApprovalRequestRecord): void {
+    if (!this._rootWireHub) return;
+    this._rootWireHub.publishNowait({
+      id: request.id,
+      tool_call_id: request.toolCallId,
+      sender: request.sender,
+      action: request.action,
+      description: request.description,
+      display: request.display,
+      source_kind: request.source.kind,
+      source_id: request.source.id,
+      agent_id: request.source.agentId ?? null,
+      subagent_type: request.source.subagentType ?? null,
+      source_description: null,
+    } as unknown as WireApprovalRequest);
+  }
+
+  private _publishWireResponse(
+    requestId: string,
+    response: ApprovalResponseKind,
+    feedback = "",
+  ): void {
+    if (!this._rootWireHub) return;
+    this._rootWireHub.publishNowait({
+      request_id: requestId,
+      response,
+      feedback,
+    } as unknown as WireApprovalResponse);
   }
 }

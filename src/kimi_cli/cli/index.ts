@@ -57,6 +57,10 @@ import { loginCommand } from "./login.ts";
 import { logoutCommand } from "./logout.ts";
 import { infoCommand } from "./info.ts";
 import { exportCommand } from "./export.ts";
+import { mcpCommand } from "./mcp.ts";
+import { pluginCommand } from "./plugin.ts";
+import { visCommand } from "./vis.ts";
+import { webCommand } from "./web.ts";
 
 // ── Version callback ─────────────────────────────────────
 
@@ -78,7 +82,11 @@ const program = new Command()
   .addCommand(loginCommand)
   .addCommand(logoutCommand)
   .addCommand(infoCommand)
-  .addCommand(exportCommand);
+  .addCommand(exportCommand)
+  .addCommand(mcpCommand)
+  .addCommand(pluginCommand)
+  .addCommand(visCommand)
+  .addCommand(webCommand);
 
 // Main chat command (default)
 program
@@ -87,6 +95,7 @@ program
   .option("--thinking", "Enable thinking mode")
   .option("--no-thinking", "Disable thinking mode")
   .option("--yolo", "Auto-approve all tool calls")
+  .option("-y, --yes", "Alias for --yolo (auto-approve all tool calls)")
   .option("--print", "Print mode (non-interactive)")
   .option("-w, --work-dir <dir>", "Working directory")
   .option("--add-dir <dir...>", "Add additional directories to the workspace")
@@ -108,6 +117,9 @@ program
   .option("--agent-file <path>", "Custom agent specification file")
   .option("--mcp-config-file <path...>", "MCP config file(s) to load")
   .option("--mcp-config <json...>", "MCP config JSON to load")
+  .option("--command <cmd>", "Run a single shell command and exit")
+  .option("--skills-dir <dir...>", "Custom skills directories (repeatable)")
+  .option("--max-ralph-iterations <n>", "Max ralph loop iterations", parseInt)
   .action(
     async (
       promptParts: string[],
@@ -115,6 +127,7 @@ program
         model?: string;
         thinking?: boolean;
         yolo?: boolean;
+        yes?: boolean;
         print?: boolean;
         workDir?: string;
         addDir?: string[];
@@ -136,8 +149,13 @@ program
         agentFile?: string;
         mcpConfigFile?: string[];
         mcpConfig?: string[];
+        command?: string;
+        skillsDir?: string[];
+        maxRalphIterations?: number;
       },
     ) => {
+      // Handle --yes alias for --yolo
+      if (options.yes) options.yolo = true;
       // Handle --quiet alias
       if (options.quiet) {
         options.print = true;

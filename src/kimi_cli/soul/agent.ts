@@ -13,6 +13,9 @@ import { KimiToolset } from "./toolset.ts";
 import { SlashCommandRegistry, createDefaultRegistry } from "./slash.ts";
 import { Context } from "./context.ts";
 import { logger } from "../utils/logging.ts";
+import type { LaborMarket } from "../subagents/registry.ts";
+import type { SubagentStore } from "../subagents/store.ts";
+import type { ApprovalRuntime } from "../approval_runtime/index.ts";
 
 // ── Built-in system prompt args ──────────────────────
 
@@ -38,6 +41,9 @@ export class Runtime {
   builtinArgs: BuiltinSystemPromptArgs;
   role: "root" | "subagent";
   additionalDirs: string[];
+  laborMarket: LaborMarket | null;
+  subagentStore: SubagentStore | null;
+  approvalRuntime: ApprovalRuntime | null;
 
   constructor(opts: {
     config: Config;
@@ -48,6 +54,9 @@ export class Runtime {
     builtinArgs: BuiltinSystemPromptArgs;
     role?: "root" | "subagent";
     additionalDirs?: string[];
+    laborMarket?: LaborMarket | null;
+    subagentStore?: SubagentStore | null;
+    approvalRuntime?: ApprovalRuntime | null;
   }) {
     this.config = opts.config;
     this.llm = opts.llm;
@@ -57,6 +66,9 @@ export class Runtime {
     this.builtinArgs = opts.builtinArgs;
     this.role = opts.role ?? "root";
     this.additionalDirs = opts.additionalDirs ?? [];
+    this.laborMarket = opts.laborMarket ?? null;
+    this.subagentStore = opts.subagentStore ?? null;
+    this.approvalRuntime = opts.approvalRuntime ?? null;
   }
 
   get loopControl(): LoopControl {
@@ -152,6 +164,9 @@ export class Runtime {
       role: "subagent",
       // Share the same list reference so /add-dir mutations propagate to all agents
       additionalDirs: this.additionalDirs,
+      laborMarket: this.laborMarket,
+      subagentStore: this.subagentStore,
+      approvalRuntime: this.approvalRuntime,
     });
   }
 }
@@ -236,12 +251,13 @@ export async function loadAgent(opts: {
             }
           : undefined,
       },
+      runtime,
     },
     hookEngine: runtime.hookEngine,
   });
 
   // Register built-in tools
-  await registerBuiltinTools(toolset);
+  await registerBuiltinTools(toolset, runtime);
 
   return new Agent({
     name: agentName,
@@ -285,7 +301,7 @@ async function loadSystemPrompt(
   ].join("\n");
 }
 
-async function registerBuiltinTools(toolset: KimiToolset): Promise<void> {
+async function registerBuiltinTools(toolset: KimiToolset, runtime: Runtime): Promise<void> {
   // Import and register all built-in tools
   const toolModules = [
     () => import("../tools/file/read.ts"),
@@ -326,6 +342,16 @@ async function registerBuiltinTools(toolset: KimiToolset): Promise<void> {
     } catch (err) {
       logger.warn(`Failed to load tool module: ${err}`);
     }
+  }
+
+  // Register Agent tool (needs runtime for description building)
+  try {
+    const { AgentTool } = await import("../tools/agent/agent.ts");
+    const agentTool = new AgentTool();
+    agentTool.buildDescription(runtime);
+    toolset.add(agentTool);
+  } catch (err) {
+    logger.warn(`Failed to load Agent tool: ${err}`);
   }
 }
 
