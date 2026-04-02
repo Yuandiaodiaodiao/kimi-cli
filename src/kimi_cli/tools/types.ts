@@ -24,6 +24,10 @@ export interface ToolContext {
   setPlanMode?: (on: boolean) => void;
   /** Get current plan mode status. */
   getPlanMode?: () => boolean;
+  /** Get plan file path. */
+  getPlanFilePath?: () => string | undefined;
+  /** Toggle plan mode (manual toggle from slash command). */
+  togglePlanMode?: () => void;
   /** Ask the user a question and get the answer (for AskUserQuestion tool). */
   askUser?: (question: string, options?: string[]) => Promise<string>;
   /** Access to service config (for SearchWeb, FetchURL). */

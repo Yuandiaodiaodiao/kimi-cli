@@ -59,6 +59,13 @@ export class TextPrinter implements Printer {
           chalk.dim(`[tool] ${event.name}(${truncateStr(event.arguments, 60)})\n`),
         );
         break;
+      case "tool_call_delta":
+        // Streaming tool call args — ignore in text mode
+        break;
+      case "plan_display":
+        process.stdout.write(chalk.blue.bold("📋 Plan") + chalk.grey(` (${(event as any).filePath})`) + "\n");
+        process.stdout.write((event as any).content + "\n");
+        break;
       case "tool_result":
         if (event.result.return_value.isError) {
           process.stderr.write(
@@ -74,9 +81,12 @@ export class TextPrinter implements Printer {
       case "error":
         process.stderr.write(chalk.red(`Error: ${event.message}\n`));
         break;
-      case "notification":
-        process.stderr.write(chalk.dim(`[${event.title}] ${event.body}\n`));
+      case "notification": {
+        const sev = (event as any).severity;
+        const prefix = sev === "error" ? chalk.red("[error]") : sev === "warning" ? chalk.yellow("[warn]") : chalk.dim(`[${event.title}]`);
+        process.stderr.write(`${prefix} ${event.body}\n`);
         break;
+      }
       case "turn_end":
         process.stdout.write("\n");
         break;
@@ -125,6 +135,15 @@ export class JsonPrinter implements Printer {
           tool_call_id: event.toolCallId,
           content: event.result.return_value.output,
           is_error: event.result.return_value.isError,
+        });
+        break;
+      case "plan_display":
+        this.flushAssistantMessage();
+        this.flushNotifications();
+        this.emitJson({
+          type: "plan_display",
+          content: (event as any).content,
+          file_path: (event as any).filePath,
         });
         break;
       case "error":
@@ -238,17 +257,73 @@ export class FinalOnlyJsonPrinter implements Printer {
   }
 }
 
+// ── StreamJsonPrinter ──────────────────────────────────
+
+export class StreamJsonPrinter implements Printer {
+  feed(event: WireUIEvent): void {
+    switch (event.type) {
+      case "text_delta":
+      case "think_delta":
+      case "tool_call":
+      case "tool_result":
+      case "notification":
+      case "step_begin":
+      case "step_interrupted":
+      case "turn_end":
+        this.emitJson(event as unknown as Record<string, unknown>);
+        break;
+      case "error":
+        process.stderr.write(chalk.red(`Error: ${(event as any).message}\n`));
+        break;
+    }
+  }
+
+  private emitJson(data: Record<string, unknown>): void {
+    process.stdout.write(JSON.stringify(data) + "\n");
+  }
+
+  flush(): void {}
+}
+
+// ── FinalOnlyStreamJsonPrinter ────────────────────────
+
+export class FinalOnlyStreamJsonPrinter implements Printer {
+  private textBuffer = "";
+
+  feed(event: WireUIEvent): void {
+    switch (event.type) {
+      case "text_delta":
+        this.textBuffer += event.text;
+        break;
+      case "step_begin":
+      case "step_interrupted":
+        this.textBuffer = "";
+        break;
+      case "error":
+        process.stderr.write(chalk.red(`Error: ${(event as any).message}\n`));
+        break;
+    }
+  }
+
+  flush(): void {
+    if (this.textBuffer) {
+      process.stdout.write(JSON.stringify({ type: "final_text", text: this.textBuffer }) + "\n");
+    }
+    this.textBuffer = "";
+  }
+}
+
 // ── Factory ─────────────────────────────────────────────
 
 export function createPrinter(options: PrintOptions): Printer {
   if (options.finalOnly) {
     return options.outputFormat === "text"
       ? new FinalOnlyTextPrinter()
-      : new FinalOnlyJsonPrinter();
+      : new FinalOnlyStreamJsonPrinter();
   }
   return options.outputFormat === "text"
     ? new TextPrinter()
-    : new JsonPrinter();
+    : new StreamJsonPrinter();
 }
 
 // ── Legacy PrintMode (wraps Printer) ────────────────────
@@ -262,6 +337,9 @@ export class PrintMode {
 
   handleEvent(event: WireUIEvent): void {
     this.printer.feed(event);
+    if (event.type === "turn_end") {
+      this.printer.flush();
+    }
   }
 
   flush(): void {
@@ -292,6 +370,93 @@ export function classifyError(
   }
   return "unknown";
 }
+
+// ── Stream-JSON Input Parser ─────────────────────────────
+
+/**
+ * Parse a stream-json input line into a user command.
+ * Returns null if the line is invalid or non-user role.
+ * Corresponds to Python Print._read_next_command().
+ */
+export function parseStreamJsonInput(jsonLine: string): string | null {
+  const trimmed = jsonLine.trim();
+  if (!trimmed) return null;
+
+  try {
+    const data = JSON.parse(trimmed);
+    if (!data || typeof data !== "object") return null;
+
+    // Expect { role: "user", content: "..." } or { role: "user", content: [...] }
+    if (data.role !== "user") return null;
+
+    if (typeof data.content === "string") {
+      return data.content;
+    }
+
+    if (Array.isArray(data.content)) {
+      // Extract text parts and join
+      const texts: string[] = [];
+      for (const part of data.content) {
+        if (part && typeof part === "object" && part.type === "text" && typeof part.text === "string") {
+          texts.push(part.text);
+        }
+      }
+      return texts.length > 0 ? texts.join("\n") : null;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read stream-json lines from a ReadableStream, yielding user commands.
+ * Corresponds to the Python Print._read_next_command loop.
+ */
+export async function* readStreamJsonInput(
+  input: ReadableStream<Uint8Array> | AsyncIterable<string>,
+): AsyncGenerator<string> {
+  let buffer = "";
+
+  if ("getReader" in input) {
+    const reader = (input as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const command = parseStreamJsonInput(line);
+          if (command) yield command;
+        }
+      }
+      // Process remaining buffer
+      if (buffer.trim()) {
+        const command = parseStreamJsonInput(buffer);
+        if (command) yield command;
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  } else {
+    for await (const line of input as AsyncIterable<string>) {
+      const command = parseStreamJsonInput(line);
+      if (command) yield command;
+    }
+  }
+}
+
+// ── Exit Codes ──────────────────────────────────────────────
+
+export const ExitCode = {
+  SUCCESS: 0,
+  FAILURE: 1,
+  RETRYABLE: 2,
+} as const;
 
 function truncateStr(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;

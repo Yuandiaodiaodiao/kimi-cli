@@ -183,8 +183,7 @@ program
             yolo: options.yolo ?? true, // print mode implies yolo
             sessionId: options.session,
             continueSession: options.continue,
-            maxStepsPerTurn: options.maxStepsPerTurn,
-            maxRetriesPerStep: options.maxRetriesPerStep,
+            maxStepsPerTurn: options.maxStepsPerTurn ?? options.maxRetriesPerStep,
             callbacks,
           });
 
@@ -201,16 +200,13 @@ program
             yolo: options.yolo,
             sessionId: options.session,
             continueSession: options.continue,
-            maxStepsPerTurn: options.maxStepsPerTurn,
-            maxRetriesPerStep: options.maxRetriesPerStep,
+            maxStepsPerTurn: options.maxStepsPerTurn ?? options.maxRetriesPerStep,
             callbacks: {},
           });
-          if (typeof app.runWireStdio === "function") {
-            await app.runWireStdio();
-          } else {
-            console.error("Wire mode is not yet implemented.");
-            process.exit(1);
-          }
+          // Wire mode not yet implemented
+          console.error("Wire mode is not yet implemented.");
+          await app.shutdown();
+          process.exit(1);
         } else {
           // ── Interactive mode: callbacks push wire events to React Ink UI ──
 
@@ -297,8 +293,7 @@ program
             yolo: options.yolo,
             sessionId: options.session,
             continueSession: options.continue,
-            maxStepsPerTurn: options.maxStepsPerTurn,
-            maxRetriesPerStep: options.maxRetriesPerStep,
+            maxStepsPerTurn: options.maxStepsPerTurn ?? options.maxRetriesPerStep,
             callbacks,
           });
 

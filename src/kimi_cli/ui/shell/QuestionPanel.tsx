@@ -40,7 +40,7 @@ export function QuestionPanel({
   const [otherText, setOtherText] = useState("");
   const [otherDrafts, setOtherDrafts] = useState<Record<number, string>>({});
 
-  const question: QuestionItem = request.questions[questionIndex];
+  const question: QuestionItem = request.questions[questionIndex]!;
   const options: OptionEntry[] = [
     ...question.options.map((o) => ({
       label: o.label,
@@ -65,7 +65,7 @@ export function QuestionPanel({
     }
     for (let offset = 1; offset <= total; offset++) {
       const idx = (questionIndex + offset) % total;
-      if (!(request.questions[idx].question in newAnswers)) {
+      if (!(request.questions[idx]!.question in newAnswers)) {
         setQuestionIndex(idx);
         setSelectedIndex(0);
         setMultiSelected(new Set());
@@ -88,7 +88,7 @@ export function QuestionPanel({
       const selected = [...multiSelected]
         .filter((i) => i < question.options.length)
         .sort()
-        .map((i) => options[i].label);
+        .map((i) => options[i]!.label);
       if (selected.length === 0) return;
       const newAnswers = { ...answers, [question.question]: selected.join(", ") };
       setAnswers(newAnswers);
@@ -105,7 +105,7 @@ export function QuestionPanel({
       }
       const newAnswers = {
         ...answers,
-        [question.question]: options[selectedIndex].label,
+        [question.question]: options[selectedIndex]!.label,
       };
       setAnswers(newAnswers);
       if (Object.keys(newAnswers).length >= request.questions.length) {
@@ -115,7 +115,7 @@ export function QuestionPanel({
         const total = request.questions.length;
         for (let offset = 1; offset <= total; offset++) {
           const idx = (questionIndex + offset) % total;
-          if (!(request.questions[idx].question in newAnswers)) {
+          if (!(request.questions[idx]!.question in newAnswers)) {
             setQuestionIndex(idx);
             setSelectedIndex(0);
             setMultiSelected(new Set());
@@ -147,7 +147,7 @@ export function QuestionPanel({
         const selected = [...multiSelected]
           .filter((i) => i < question.options.length && i !== otherIdx)
           .sort()
-          .map((i) => options[i].label);
+          .map((i) => options[i]!.label);
         if (text) selected.push(text);
         newAnswers = {
           ...answers,
@@ -165,7 +165,7 @@ export function QuestionPanel({
         const total = request.questions.length;
         for (let offset = 1; offset <= total; offset++) {
           const idx = (questionIndex + offset) % total;
-          if (!(request.questions[idx].question in newAnswers)) {
+          if (!(request.questions[idx]!.question in newAnswers)) {
             setQuestionIndex(idx);
             setSelectedIndex(0);
             setMultiSelected(new Set());
@@ -263,7 +263,7 @@ export function QuestionPanel({
           // Direct submit for non-other
           const newAnswers = {
             ...answers,
-            [question.question]: options[idx].label,
+            [question.question]: options[idx]!.label,
           };
           setAnswers(newAnswers);
           if (Object.keys(newAnswers).length >= request.questions.length) {
@@ -273,7 +273,7 @@ export function QuestionPanel({
             for (let offset = 1; offset <= total; offset++) {
               const nextIdx = (questionIndex + offset) % total;
               if (
-                !(request.questions[nextIdx].question in newAnswers)
+                !(request.questions[nextIdx]!.question in newAnswers)
               ) {
                 setQuestionIndex(nextIdx);
                 setSelectedIndex(0);

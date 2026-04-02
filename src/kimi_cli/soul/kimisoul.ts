@@ -946,7 +946,7 @@ export class KimiSoul {
     const ctx = this.agent.toolset.context;
     ctx.setPlanMode = (on: boolean) => this.setPlanMode(on);
     ctx.getPlanMode = () => this._planMode;
-    ctx.getPlanFilePath = () => this.getPlanFilePath();
+    ctx.getPlanFilePath = () => this.getPlanFilePath() ?? undefined;
     ctx.togglePlanMode = () => this.togglePlanMode();
   }
 

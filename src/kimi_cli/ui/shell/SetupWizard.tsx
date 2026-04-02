@@ -114,7 +114,7 @@ export function SetupWizard({
         } else if (key.downArrow) {
           setSelectedIndex((i) => (i + 1) % platforms.length);
         } else if (key.return) {
-          const platform = platforms[selectedIndex];
+          const platform = platforms[selectedIndex]!;
           setSelectedPlatform(platform);
           setStep("api_key");
           setSelectedIndex(0);
@@ -139,7 +139,7 @@ export function SetupWizard({
         } else if (key.downArrow) {
           setSelectedIndex((i) => (i + 1) % models.length);
         } else if (key.return) {
-          const model = models[selectedIndex];
+          const model = models[selectedIndex]!;
           const caps = model.capabilities || [];
           if (caps.includes("always_thinking")) {
             finishSetup(model, true);

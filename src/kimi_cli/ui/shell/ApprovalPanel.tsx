@@ -100,6 +100,7 @@ function ContentPreview({ blocks }: { blocks: DisplayBlock[] }) {
       break;
     }
 
+    if (!block) continue;
     if (block.type === "shell") {
       const shellBlock = block as ShellDisplayBlock;
       const lines = shellBlock.command.trim().split("\n");
@@ -160,7 +161,7 @@ export function ApprovalPanel({ request, onRespond }: ApprovalPanelProps) {
         setFeedbackMode(true);
         return;
       }
-      onRespond(OPTIONS[index].response);
+      onRespond(OPTIONS[index]!.response);
     },
     [onRespond],
   );

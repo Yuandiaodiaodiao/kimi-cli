@@ -107,6 +107,17 @@ async function runHook(
       try {
         const parsed = JSON.parse(stdout.trim());
         if (parsed && typeof parsed === "object") {
+          // Direct action field (e.g. {"action":"block","reason":"..."})
+          if (parsed.action === "block") {
+            return {
+              action: "block",
+              reason: String(parsed.reason ?? ""),
+              stdout,
+              stderr,
+              exitCode: 0,
+            };
+          }
+          // Claude Code-style hookSpecificOutput
           const hookOutput = parsed.hookSpecificOutput;
           if (hookOutput?.permissionDecision === "deny") {
             return {

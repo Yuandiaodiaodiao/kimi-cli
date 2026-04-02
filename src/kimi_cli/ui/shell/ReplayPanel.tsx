@@ -23,12 +23,16 @@ export interface ReplayTurn {
 }
 
 export interface ReplayEvent {
-  type: "text" | "think" | "tool_call" | "tool_result" | "step_begin";
+  type: "text" | "think" | "tool_call" | "tool_result" | "step_begin" | "notification" | "plan_display";
   text?: string;
   toolName?: string;
   toolArgs?: string;
   toolCallId?: string;
   isError?: boolean;
+  title?: string;
+  body?: string;
+  content?: string;
+  filePath?: string;
 }
 
 export interface ReplayPanelProps {
@@ -78,6 +82,20 @@ function ReplayEventView({ event }: { event: ReplayEvent }) {
             {event.isError ? "✗" : "✓"}{" "}
           </Text>
           {event.text && <Text color="grey">{truncate(event.text, 100)}</Text>}
+        </Box>
+      );
+    case "notification":
+      return (
+        <Box marginLeft={2}>
+          <Text color="#56a4ff">ℹ </Text>
+          <Text color="#6b7280">[{event.title}] {event.body}</Text>
+        </Box>
+      );
+    case "plan_display":
+      return (
+        <Box marginLeft={2} flexDirection="column">
+          <Text color="#56a4ff" bold>📋 Plan</Text>
+          {event.content && <Text color="#9ca3af">{truncate(event.content, 200)}</Text>}
         </Box>
       );
     case "step_begin":
@@ -168,6 +186,24 @@ export function buildReplayTurnsFromEvents(events: WireUIEvent[]): ReplayTurn[] 
             toolCallId: event.toolCallId,
             text: event.result.return_value.output,
             isError: event.result.return_value.isError,
+          });
+        }
+        break;
+      case "notification":
+        if (currentTurn) {
+          currentTurn.events.push({
+            type: "notification",
+            title: event.title,
+            body: event.body,
+          });
+        }
+        break;
+      case "plan_display":
+        if (currentTurn) {
+          currentTurn.events.push({
+            type: "plan_display",
+            content: (event as any).content,
+            filePath: (event as any).filePath,
           });
         }
         break;

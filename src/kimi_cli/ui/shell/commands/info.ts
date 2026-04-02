@@ -54,7 +54,7 @@ export function handleDebug(context: Context): void {
     } else if (Array.isArray(msg.content)) {
       const parts = msg.content as ContentPart[];
       const summary = parts
-        .map((p) => {
+        .map((p: any) => {
           if (p.type === "text")
             return p.text.length > 100 ? p.text.slice(0, 100) + "..." : p.text;
           if (p.type === "tool_use") return `[tool_use: ${p.name}]`;

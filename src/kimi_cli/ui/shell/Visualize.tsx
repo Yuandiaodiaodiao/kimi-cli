@@ -752,6 +752,140 @@ function renderStreamingJson(partial: string): string {
   return truncate(partial, 60);
 }
 
+// ── NotificationView ────────────────────────────────────────
+
+export interface NotificationViewProps {
+  title: string;
+  body: string;
+  severity?: string;
+}
+
+export function NotificationView({ title, body, severity }: NotificationViewProps) {
+  const icon = severity === "error" ? "✗" : severity === "warning" ? "⚠" : "ℹ";
+  const color = severity === "error" ? "#ff7b72" : severity === "warning" ? "#f2cc60" : "#56a4ff";
+
+  return (
+    <Box flexDirection="column" marginY={0}>
+      <Box>
+        <Text color={color} bold>{icon} {title}</Text>
+      </Box>
+      {body && (
+        <Box marginLeft={2}>
+          <Text color="#9ca3af">{body}</Text>
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+// ── StatusView (context token usage) ────────────────────────
+
+export interface StatusViewProps {
+  contextTokens: number;
+  maxContextTokens: number;
+  contextUsage?: number | null;
+}
+
+export function StatusView({ contextTokens, maxContextTokens, contextUsage }: StatusViewProps) {
+  const ratio = maxContextTokens > 0 ? contextTokens / maxContextTokens : 0;
+  const percent = (ratio * 100).toFixed(0);
+  const barWidth = 20;
+  const filled = Math.round(ratio * barWidth);
+  const empty = barWidth - filled;
+  const color = ratio >= 0.9 ? "#ff7b72" : ratio >= 0.7 ? "#f2cc60" : "#56d364";
+
+  return (
+    <Box>
+      <Text color="#6b7280">context </Text>
+      <Text color={color}>{"█".repeat(filled)}</Text>
+      <Text color="#3f3f46">{"░".repeat(empty)}</Text>
+      <Text color="#6b7280"> {percent}% ({(contextTokens / 1000).toFixed(1)}k/{(maxContextTokens / 1000).toFixed(1)}k)</Text>
+    </Box>
+  );
+}
+
+// ── PlanDisplayView ─────────────────────────────────────────
+
+export function PlanDisplayView({ content, filePath }: { content: string; filePath: string }) {
+  const rendered = renderMarkdown(content);
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="#56a4ff" paddingX={1} marginY={1}>
+      <Box>
+        <Text color="#56a4ff" bold>📋 Plan</Text>
+        <Text color="#6b7280"> ({filePath})</Text>
+      </Box>
+      <Box flexDirection="column" marginTop={1}>
+        {rendered}
+      </Box>
+    </Box>
+  );
+}
+
+// ── HookView ────────────────────────────────────────────────
+
+export function HookTriggeredView({ event, target, hookCount }: { event: string; target: string; hookCount: number }) {
+  return (
+    <Box>
+      <Text color="#6b7280">⟳ hook </Text>
+      <Text color="#f2cc60">{event}</Text>
+      {target && <Text color="#6b7280"> → {target}</Text>}
+      {hookCount > 1 && <Text color="#6b7280"> ({hookCount} hooks)</Text>}
+    </Box>
+  );
+}
+
+export function HookResolvedView({ event, target, action, reason, durationMs }: { event: string; target: string; action: string; reason: string; durationMs: number }) {
+  const icon = action === "allow" ? "✓" : "✗";
+  const color = action === "allow" ? "#56d364" : "#ff7b72";
+  return (
+    <Box>
+      <Text color={color}>{icon} hook </Text>
+      <Text color="#f2cc60">{event}</Text>
+      {target && <Text color="#6b7280"> → {target}</Text>}
+      <Text color="#6b7280"> ({action}{reason ? `: ${reason}` : ""}) {durationMs}ms</Text>
+    </Box>
+  );
+}
+
+// ── Enhanced DiffView with line numbers and context ─────────
+
+function EnhancedDiffView({
+  block,
+}: {
+  block: { path: string; old_text: string; new_text: string; old_start?: number; new_start?: number };
+}) {
+  const diffColors = getDiffColors();
+  const oldStart = block.old_start ?? 1;
+  const newStart = block.new_start ?? 1;
+  const oldLines = block.old_text.split("\n").filter(Boolean);
+  const newLines = block.new_text.split("\n").filter(Boolean);
+
+  // Determine max line number width for alignment
+  const maxLineNum = Math.max(oldStart + oldLines.length, newStart + newLines.length);
+  const lineNumWidth = String(maxLineNum).length;
+
+  return (
+    <Box flexDirection="column">
+      <Text color="#e6e6e6" bold>
+        {block.path}
+      </Text>
+      <Text color="#6b7280">
+        @@ -{oldStart},{oldLines.length} +{newStart},{newLines.length} @@
+      </Text>
+      {oldLines.map((line, idx) => (
+        <Text key={`old-${idx}`} color="#ff7b72" backgroundColor={diffColors.delBg}>
+          {String(oldStart + idx).padStart(lineNumWidth)} - {line}
+        </Text>
+      ))}
+      {newLines.map((line, idx) => (
+        <Text key={`new-${idx}`} color="#56d364" backgroundColor={diffColors.addBg}>
+          {String(newStart + idx).padStart(lineNumWidth)} + {line}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
 // ── Helpers ────────────────────────────────────────────────
 
 function truncate(text: string, maxLen: number): string {

@@ -3,7 +3,7 @@
  * Provides an extensible provider pattern for injecting dynamic prompts before LLM steps.
  */
 
-import type { Message } from "../types.ts";
+import type { Message, ContentPart } from "../types.ts";
 import type { KimiSoul } from "./kimisoul.ts";
 
 // ── DynamicInjection ─────────────────────────────────
@@ -72,10 +72,10 @@ export function normalizeHistory(messages: readonly Message[]): Message[] {
 // ── Helpers ──────────────────────────────────────────
 
 function toContentArray(
-  content: string | readonly { type: string; [key: string]: unknown }[],
-): { type: string; [key: string]: unknown }[] {
+  content: string | readonly ContentPart[],
+): ContentPart[] {
   if (typeof content === "string") {
-    return [{ type: "text", text: content }];
+    return [{ type: "text" as const, text: content }];
   }
   return [...content];
 }

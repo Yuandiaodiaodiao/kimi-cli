@@ -52,11 +52,20 @@ export type WireUIEvent =
   | { type: "text_delta"; text: string }
   | { type: "think_delta"; text: string }
   | { type: "tool_call"; id: string; name: string; arguments: string }
+  | { type: "tool_call_delta"; id: string; arguments: string }
   | { type: "tool_result"; toolCallId: string; result: ToolResult }
   | { type: "approval_request"; request: ApprovalRequest }
   | { type: "approval_response"; requestId: string; response: string }
+  | { type: "question_request"; request: import("../../wire/types.ts").QuestionRequest }
+  | { type: "question_response"; requestId: string; answers: Record<string, string> }
   | { type: "status_update"; status: StatusUpdate }
   | { type: "compaction_begin" }
   | { type: "compaction_end" }
-  | { type: "notification"; title: string; body: string }
-  | { type: "error"; message: string };
+  | { type: "notification"; title: string; body: string; severity?: string }
+  | { type: "plan_display"; content: string; filePath: string }
+  | { type: "hook_triggered"; event: string; target: string; hookCount: number }
+  | { type: "hook_resolved"; event: string; target: string; action: string; reason: string; durationMs: number }
+  | { type: "mcp_loading_begin" }
+  | { type: "mcp_loading_end" }
+  | { type: "subagent_event"; parentToolCallId: string | null; agentId: string | null; subagentType: string | null; event: Record<string, unknown> }
+  | { type: "error"; message: string; retryable?: boolean; retryAfter?: number };
